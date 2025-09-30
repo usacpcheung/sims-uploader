@@ -1,0 +1,10 @@
+pandas>=2.0
+openpyxl>=3.1
+pymysql>=1.1
+sqlalchemy>=2.0
+
+# for API layer (later, when you build upload endpoints)
+fastapi>=0.111
+uvicorn[standard]>=0.30
+
+python-dotenv>=1.0   # load DB creds from .env
