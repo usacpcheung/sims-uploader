@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Local data (don’t push real Excel/CSV with student info)
+*.xlsx
+*.csv
+
+# Secrets
+.env
+*.key
+*.pem
