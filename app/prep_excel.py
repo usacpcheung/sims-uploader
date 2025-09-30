@@ -1,21 +1,33 @@
-import re, sys, os, hashlib
+import os
+import re
+import sys
+import hashlib
+
 import pandas as pd
 import pymysql
 
-DB = dict(host="127.0.0.1", user="simsuser", password="StrongPasswordHere!", database="SIMSdata", charset="utf8mb4")
+try:
+    from .config import get_db_settings
+except ImportError:  # pragma: no cover - fallback when executed as a script
+    # Ensure the repository root is on sys.path when running ``python app/prep_excel.py``.
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from app.config import get_db_settings
+
+DB = get_db_settings()
 
 UNNAMED_PAT = re.compile(r"^Unnamed(?::\s*\d+)?$", re.IGNORECASE)
+
 
 def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all")
     df.columns = [("" if pd.isna(c) else str(c)).strip() for c in df.columns]
 
     def is_unnamed(c: str) -> bool:
-        return (c == "" or UNNAMED_PAT.match(c) is not None)
+        return c == "" or UNNAMED_PAT.match(c) is not None
 
     flags = [is_unnamed(c) for c in df.columns]
     last_idx = None
-    for i in range(len(df.columns)-1, -1, -1):
+    for i in range(len(df.columns) - 1, -1, -1):
         if flags[i]:
             ser = df.iloc[:, i].astype(str).str.strip().replace({"nan": ""})
             if ser.ne("").any():
@@ -28,7 +40,8 @@ def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
     # drop any other unnamed columns that are fully empty
     drop = []
     for i, f in enumerate(flags):
-        if i == last_idx: continue
+        if i == last_idx:
+            continue
         if f:
             ser = df.iloc[:, i].astype(str).str.strip().replace({"nan": ""})
             if not ser.ne("").any():
@@ -36,6 +49,7 @@ def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
     if drop:
         df = df.drop(columns=drop)
     return df
+
 
 def get_table_order():
     conn = pymysql.connect(**DB)
@@ -46,10 +60,11 @@ def get_table_order():
     finally:
         conn.close()
     # Exclude metadata columns; we will set them via SET in LOAD DATA
-    for meta in ("id","file_hash","batch_id","source_year","ingested_at"):
+    for meta in ("id", "file_hash", "batch_id", "source_year", "ingested_at"):
         if meta in cols:
             cols.remove(meta)
     return cols
+
 
 def main(xlsx_path, sheet="TEACH_RECORD"):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
@@ -67,13 +82,16 @@ def main(xlsx_path, sheet="TEACH_RECORD"):
     df.to_csv(csv_path, index=False)
 
     # metadata
-    file_hash = hashlib.sha256(open(xlsx_path,'rb').read()).hexdigest()
+    with open(xlsx_path, "rb") as source:
+        file_hash = hashlib.sha256(source.read()).hexdigest()
     print(csv_path)
     print(file_hash)
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: prep_excel.py /path/to/file.xlsx [SheetName]", file=sys.stderr); sys.exit(1)
+        print("Usage: prep_excel.py /path/to/file.xlsx [SheetName]", file=sys.stderr)
+        sys.exit(1)
     xlsx = sys.argv[1]
     sheet = sys.argv[2] if len(sys.argv) > 2 else "TEACH_RECORD"
     main(xlsx, sheet)
