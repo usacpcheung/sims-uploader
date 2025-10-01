@@ -38,11 +38,32 @@ class MissingColumnsError(RuntimeError):
         super().__init__(message)
 
 
+def _series_has_data(series: pd.Series) -> bool:
+    cleaned = series.astype(str).str.strip()
+    cleaned = cleaned.replace({
+        "nan": "",
+        "None": "",
+        "NONE": "",
+        "<NA>": "",
+        "NaT": "",
+    })
+    return cleaned.ne("").any()
+
+
 def normalize_headers_and_subject(
     df: pd.DataFrame, *, rename_last_subject: bool = True
 ) -> pd.DataFrame:
-    df = df.dropna(axis=1, how="all")
     df.columns = [("" if pd.isna(c) else str(c)).strip() for c in df.columns]
+
+    keep_mask: list[bool] = []
+    for i, column_name in enumerate(df.columns):
+        if column_name == "" and not _series_has_data(df.iloc[:, i]):
+            keep_mask.append(False)
+        else:
+            keep_mask.append(True)
+
+    if not all(keep_mask):
+        df = df.loc[:, keep_mask]
 
     if not rename_last_subject:
         return df
@@ -54,8 +75,7 @@ def normalize_headers_and_subject(
     last_idx = None
     for i in range(len(df.columns) - 1, -1, -1):
         if flags[i]:
-            ser = df.iloc[:, i].astype(str).str.strip().replace({"nan": ""})
-            if ser.ne("").any():
+            if _series_has_data(df.iloc[:, i]):
                 last_idx = i
                 break
     if last_idx is not None:
@@ -68,8 +88,7 @@ def normalize_headers_and_subject(
         if i == last_idx:
             continue
         if f:
-            ser = df.iloc[:, i].astype(str).str.strip().replace({"nan": ""})
-            if not ser.ne("").any():
+            if not _series_has_data(df.iloc[:, i]):
                 drop.append(df.columns[i])
     if drop:
         df = df.drop(columns=drop)

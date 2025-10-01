@@ -53,6 +53,20 @@ class PrepExcelSchemaTests(unittest.TestCase):
     def tearDown(self):
         prep_excel._get_sheet_config.cache_clear()
 
+    def test_normalize_headers_drops_blank_header_with_no_data(self):
+        df = pd.DataFrame({" ": [pd.NA, None], "Keep": ["A", "B"]})
+
+        result = prep_excel.normalize_headers_and_subject(df, rename_last_subject=False)
+
+        self.assertListEqual(list(result.columns), ["Keep"])
+
+    def test_normalize_headers_keeps_blank_header_with_data(self):
+        df = pd.DataFrame({" ": ["Value", ""], "Keep": ["A", "B"]})
+
+        result = prep_excel.normalize_headers_and_subject(df, rename_last_subject=False)
+
+        self.assertListEqual(list(result.columns), ["", "Keep"])
+
     def test_get_schema_details_uses_information_schema(self):
         config_rows = [
             {
