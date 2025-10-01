@@ -22,6 +22,9 @@ sims-uploader/
 ├── sql/
 │   └── teach_record_raw.sql    # Example staging table DDL
 │
+├── uploads/                    # Drop source Excel/CSV files here (git-ignored contents)
+│   └── .gitkeep
+│
 ├── .env.example                # Template for local environment variables
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Project overview
@@ -44,6 +47,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # then edit .env with your database credentials
+mkdir -p uploads      # optional: ensure the uploads/ workspace exists
 ```
 
 The `.env` file is loaded automatically by all ingestion tools via `app.config`, keeping credentials out of source code.
@@ -62,9 +66,9 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 2. **Preprocess Excel**
    ```bash
    source .venv/bin/activate
-   python -m app.prep_excel /path/to/input.xlsx
+   python -m app.prep_excel uploads/your_file.xlsx
    ```
-   This reads `.env` for database access, then creates a cleaned `.csv` aligned to the staging table. The command exits immediately with a helpful message if any required `DB_...` variables are missing.
+   Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. It exits immediately with a helpful message if any required `DB_...` variables are missing.
 
 3. **Load into MariaDB**
    ```sql
@@ -90,6 +94,6 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
 ## 🛡️ Notes
 
-- `.xlsx`, `.csv`, `.env` files are **ignored** by Git — do not commit real student/teacher data.
+- `.xlsx`, `.csv`, `.env`, and everything under `uploads/` are **ignored** by Git — do not commit real student/teacher data.
 - Always use `utf8mb4` for safe Unicode (Chinese characters, emoji, etc.).
 - Credentials go into a local `.env` file (never pushed to GitHub). When adding new FastAPI apps or CLI commands, import helpers from `app.config` so secrets remain centralized.
