@@ -86,7 +86,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
             schema,
             {
                 "order": ["日期", "任教老師", "學生編號"],
-                "required": ["日期", "學生編號"],
+                "required": ["日期", "任教老師", "學生編號"],
             },
         )
         self.assertTrue(config_connection.closed)

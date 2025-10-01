@@ -164,13 +164,9 @@ def get_schema_details(sheet: str = DEFAULT_SHEET) -> dict[str, list[str]]:
     ordered_columns = [
         column["name"] for column in columns if column["name"] not in metadata_columns
     ]
-    required_columns = [
-        column["name"]
-        for column in columns
-        if column["name"] not in metadata_columns
-        and not column["is_nullable"]
-        and column["default"] is None
-    ]
+    # Every non-metadata column is required; metadata columns are excluded from
+    # both ordering and validation.
+    required_columns = [column["name"] for column in columns if column["name"] not in metadata_columns]
     return {"order": ordered_columns, "required": required_columns}
 
 
