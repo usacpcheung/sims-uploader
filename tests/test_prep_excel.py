@@ -114,11 +114,22 @@ class PrepExcelSchemaTests(unittest.TestCase):
                 prep_excel.get_schema_details("UNKNOWN_SHEET")
 
     @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
-    def test_main_raises_missing_columns_error(self, mock_read_excel, mock_get_schema_details):
+    def test_main_raises_missing_columns_error(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+    ):
         mock_get_schema_details.return_value = {
             "order": ["日期", "任教老師"],
             "required": ["日期", "任教老師"],
+        }
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {"rename_last_subject": True},
         }
         mock_read_excel.return_value = pd.DataFrame({"任教老師": ["Ms. Chan"]})
 
@@ -134,6 +145,103 @@ class PrepExcelSchemaTests(unittest.TestCase):
             os.remove(excel_path)
 
         self.assertEqual(ctx.exception.missing_columns, ("日期",))
+
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_normalizes_subject_column_when_option_enabled(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+    ):
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {"rename_last_subject": True},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["教授科目", "教師"],
+            "required": [],
+        }
+        mock_read_excel.return_value = pd.DataFrame(
+            {
+                "Unnamed: 0": ["", ""],
+                "Unnamed: 1": ["Math", ""],
+                "教師": ["Ms. Chan", "Mr. Lee"],
+            }
+        )
+
+        captured: dict[str, pd.DataFrame] = {}
+
+        def fake_to_csv(self, *_args, **_kwargs):
+            captured["df"] = self.copy()
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
+                prep_excel.main(excel_path)
+        finally:
+            os.remove(excel_path)
+
+        self.assertIn("df", captured)
+        result = captured["df"]
+        self.assertIn("教授科目", result.columns)
+        self.assertNotIn("Unnamed: 1", result.columns)
+        self.assertEqual(result["教授科目"].tolist(), ["Math", ""])
+        self.assertEqual(result["教師"].tolist(), ["Ms. Chan", "Mr. Lee"])
+
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_skips_subject_normalization_when_option_disabled(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+    ):
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {"rename_last_subject": False},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["Unnamed: 0", "Unnamed: 1", "教師"],
+            "required": [],
+        }
+        mock_read_excel.return_value = pd.DataFrame(
+            {
+                "Unnamed: 0": ["", ""],
+                "Unnamed: 1": ["Math", ""],
+                "教師": ["Ms. Chan", "Mr. Lee"],
+            }
+        )
+
+        captured: dict[str, pd.DataFrame] = {}
+
+        def fake_to_csv(self, *_args, **_kwargs):
+            captured["df"] = self.copy()
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
+                prep_excel.main(excel_path)
+        finally:
+            os.remove(excel_path)
+
+        self.assertIn("df", captured)
+        result = captured["df"]
+        self.assertIn("Unnamed: 1", result.columns)
+        self.assertNotIn("教授科目", result.columns)
+        self.assertEqual(result["Unnamed: 1"].tolist(), ["Math", ""])
 
 
 if __name__ == "__main__":

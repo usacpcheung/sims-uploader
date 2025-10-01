@@ -77,15 +77,27 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    Sheet configuration (sheet→staging-table mapping, metadata columns, and future options) is stored in `sheet_ingest_config`. Each row is scoped by `workbook_type` so different templates can reuse the same worksheet label without clashing. Register the worksheets you plan to ingest with simple SQL instead of editing Python:
 
    ```sql
-   INSERT INTO sheet_ingest_config (workbook_type, sheet_name, staging_table, metadata_columns)
+   INSERT INTO sheet_ingest_config (
+     workbook_type,
+     sheet_name,
+     staging_table,
+     metadata_columns,
+     options
+   )
    VALUES (
      'prototype_teaching_records',
      'TEACH_RECORD',
      'teach_record_raw',
-     JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at')
+     JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at'),
+     JSON_OBJECT('rename_last_subject', TRUE)
    )
-   ON DUPLICATE KEY UPDATE staging_table = VALUES(staging_table), metadata_columns = VALUES(metadata_columns);
+   ON DUPLICATE KEY UPDATE
+     staging_table = VALUES(staging_table),
+     metadata_columns = VALUES(metadata_columns),
+     options = VALUES(options);
    ```
+
+   The `options` JSON column toggles sheet-specific behaviours. For example, `rename_last_subject` controls whether unnamed trailing columns are renamed to “教授科目” and other blank unnamed columns are dropped—behaviour that only the prototype teaching-record sheet currently needs. Disable it by setting the flag to `FALSE` when registering other templates.
 
    To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config` with an appropriate `workbook_type`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
 

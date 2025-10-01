@@ -38,9 +38,14 @@ class MissingColumnsError(RuntimeError):
         super().__init__(message)
 
 
-def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_headers_and_subject(
+    df: pd.DataFrame, *, rename_last_subject: bool = True
+) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all")
     df.columns = [("" if pd.isna(c) else str(c)).strip() for c in df.columns]
+
+    if not rename_last_subject:
+        return df
 
     def is_unnamed(c: str) -> bool:
         return c == "" or UNNAMED_PAT.match(c) is not None
@@ -176,7 +181,11 @@ def get_table_order(sheet: str = DEFAULT_SHEET) -> list[str]:
 
 def main(xlsx_path, sheet=DEFAULT_SHEET):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
-    df = normalize_headers_and_subject(df)
+
+    config = _get_table_config(sheet)
+    options = config.get("options") or {}
+    rename_last_subject = bool(options.get("rename_last_subject"))
+    df = normalize_headers_and_subject(df, rename_last_subject=rename_last_subject)
 
     schema = get_schema_details(sheet)
     missing = validate_required_columns(df, schema["required"])
