@@ -70,12 +70,15 @@ def main(xlsx_path, sheet="TEACH_RECORD"):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
     df = normalize_headers_and_subject(df)
 
-    # reorder to match table order; add missing columns as empty
+    # Reorder to match table order; add missing columns as empty while preserving
+    # any additional headers by appending them after the schema-aligned block.
     order = get_table_order()
+    extra_columns = [c for c in df.columns if c not in order]
     for c in order:
         if c not in df.columns:
             df[c] = None
-    df = df[order]
+    final_columns = order + extra_columns
+    df = df.reindex(columns=final_columns)
 
     # write CSV next to the xlsx
     csv_path = os.path.splitext(xlsx_path)[0] + ".csv"
