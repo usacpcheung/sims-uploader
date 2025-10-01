@@ -70,6 +70,8 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    ```
    Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. It exits immediately with a helpful message if any required `DB_...` variables are missing.
 
+   The preprocessor also validates that key teaching-record headers (e.g. `日期`, `任教老師`, `學生編號`, `姓名`, `教授科目`) are present after normalization. When running via the CLI, the tool prints `Missing required column(s): …` to `stderr` and exits with status code `2`. When `app.prep_excel.main` is imported and called from another service (e.g. a future web UI), a `MissingColumnsError` is raised; the exception exposes a `.missing_columns` tuple containing the absent header names so callers can surface a structured error to end users.
+
 3. **Load into MariaDB**
    ```sql
    LOAD DATA INFILE '/var/lib/mysql-files/input.csv'

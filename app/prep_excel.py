@@ -3,6 +3,8 @@ import re
 import sys
 import hashlib
 
+from typing import Iterable, Sequence
+
 import pandas as pd
 import pymysql
 
@@ -16,6 +18,29 @@ except ImportError:  # pragma: no cover - fallback when executed as a script
 DB = get_db_settings()
 
 UNNAMED_PAT = re.compile(r"^Unnamed(?::\s*\d+)?$", re.IGNORECASE)
+
+# Columns that must be present in the spreadsheet after header normalization.
+# The order matches the teaching record export shared by the school and is a
+# subset of the staging table schema to allow future optional columns.
+REQUIRED_HEADERS: Sequence[str] = (
+    "日期",
+    "任教老師",
+    "學生編號",
+    "姓名",
+    "教授科目",
+)
+
+
+class MissingColumnsError(RuntimeError):
+    """Raised when required spreadsheet columns are missing after normalization."""
+
+    def __init__(self, missing_columns: Iterable[str]):
+        self.missing_columns = tuple(missing_columns)
+        if self.missing_columns:
+            message = "Missing required column(s): " + ", ".join(self.missing_columns)
+        else:
+            message = "Missing required column(s)."
+        super().__init__(message)
 
 
 def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
@@ -51,6 +76,12 @@ def normalize_headers_and_subject(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def validate_required_columns(df: pd.DataFrame, required: Iterable[str]) -> list[str]:
+    required_list = list(required)
+    missing = [column for column in required_list if column not in df.columns]
+    return missing
+
+
 def get_table_order():
     conn = pymysql.connect(**DB)
     try:
@@ -69,6 +100,10 @@ def get_table_order():
 def main(xlsx_path, sheet="TEACH_RECORD"):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
     df = normalize_headers_and_subject(df)
+
+    missing = validate_required_columns(df, REQUIRED_HEADERS)
+    if missing:
+        raise MissingColumnsError(missing)
 
     # Reorder to match table order; add missing columns as empty while preserving
     # any additional headers by appending them after the schema-aligned block.
@@ -97,4 +132,8 @@ if __name__ == "__main__":
         sys.exit(1)
     xlsx = sys.argv[1]
     sheet = sys.argv[2] if len(sys.argv) > 2 else "TEACH_RECORD"
-    main(xlsx, sheet)
+    try:
+        main(xlsx, sheet)
+    except MissingColumnsError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
