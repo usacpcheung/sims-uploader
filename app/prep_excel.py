@@ -121,7 +121,7 @@ def _get_sheet_config() -> dict[str, dict[str, object]]:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT sheet_name, staging_table, metadata_columns, options
+                SELECT sheet_name, staging_table, metadata_columns, required_columns, options
                   FROM {CONFIG_TABLE}
                 """
             )
@@ -132,10 +132,12 @@ def _get_sheet_config() -> dict[str, dict[str, object]]:
     config: dict[str, dict[str, object]] = {}
     for row in rows:
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
+        required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
         config[row["sheet_name"]] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
+            "required_columns": frozenset(required_columns),
             "options": options,
         }
     return config
@@ -178,14 +180,24 @@ def _fetch_table_columns(table_name: str) -> list[dict[str, object]]:
 def get_schema_details(sheet: str = DEFAULT_SHEET) -> dict[str, list[str]]:
     config = _get_table_config(sheet)
     metadata_columns = set(config.get("metadata_columns", ()))
+    required_columns_config = set(config.get("required_columns", ()))
     columns = _fetch_table_columns(config["table"])
 
     ordered_columns = [
         column["name"] for column in columns if column["name"] not in metadata_columns
     ]
-    # Every non-metadata column is required; metadata columns are excluded from
-    # both ordering and validation.
-    required_columns = [column["name"] for column in columns if column["name"] not in metadata_columns]
+    if required_columns_config:
+        required_columns = [
+            column["name"]
+            for column in columns
+            if column["name"] in required_columns_config
+        ]
+    else:
+        required_columns = [
+            column["name"]
+            for column in columns
+            if column["name"] not in metadata_columns
+        ]
     return {"order": ordered_columns, "required": required_columns}
 
 

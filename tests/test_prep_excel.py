@@ -78,6 +78,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
                 "metadata_columns": json.dumps(
                     ["id", "file_hash", "batch_id", "source_year", "ingested_at"]
                 ),
+                "required_columns": json.dumps([]),
                 "options": None,
             }
         ]
@@ -121,6 +122,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
                 "sheet_name": "SOMETHING_ELSE",
                 "staging_table": "other_table",
                 "metadata_columns": json.dumps([]),
+                "required_columns": json.dumps([]),
                 "options": None,
             }
         ]
@@ -129,6 +131,41 @@ class PrepExcelSchemaTests(unittest.TestCase):
         with mock.patch.object(prep_excel.pymysql, "connect", return_value=config_connection):
             with self.assertRaises(ValueError):
                 prep_excel.get_schema_details("UNKNOWN_SHEET")
+
+    def test_get_schema_details_respects_required_columns_from_config(self):
+        config_rows = [
+            {
+                "sheet_name": prep_excel.DEFAULT_SHEET,
+                "staging_table": "teach_record_raw",
+                "metadata_columns": json.dumps(["id", "file_hash"]),
+                "required_columns": json.dumps(["日期"]),
+                "options": None,
+            }
+        ]
+        rows = [
+            {"COLUMN_NAME": "id", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "日期", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "任教老師", "IS_NULLABLE": "YES", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "file_hash", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+        ]
+
+        config_connection = _FakeConnection(config_rows)
+        schema_connection = _FakeConnection(rows)
+
+        with mock.patch.object(
+            prep_excel.pymysql,
+            "connect",
+            side_effect=[config_connection, schema_connection],
+        ):
+            schema = prep_excel.get_schema_details()
+
+        self.assertEqual(
+            schema,
+            {
+                "order": ["日期", "任教老師"],
+                "required": ["日期"],
+            },
+        )
 
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
