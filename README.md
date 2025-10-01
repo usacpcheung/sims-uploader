@@ -116,7 +116,7 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    - `app.prep_excel.main` hashes the original workbook before writing CSV output. If the hash already exists in the destination staging table, the script skips CSV generation and logs a warning to `stderr` so automated callers can gracefully short-circuit their pipelines.
    - UI consumers should treat a duplicate submission as a no-op: surface a “file already uploaded” notice to the user, keep the previous ingestion metadata untouched, and avoid queuing a second `LOAD DATA INFILE` job.
 
-   When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading.
+   When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading. Programmatic integrations can call `app.prep_excel.main(..., emit_stdout=False)` to suppress those prints while still receiving the `(csv_path, file_hash)` tuple.
 
 3. **Load into MariaDB**
    ```sql

@@ -226,7 +226,27 @@ def _staging_file_hash_exists(table_name: str, file_hash: str) -> bool:
         conn.close()
 
 
-def main(xlsx_path, sheet=DEFAULT_SHEET):
+def main(xlsx_path, sheet=DEFAULT_SHEET, *, emit_stdout: bool = True):
+    """Preprocess an Excel worksheet into a CSV aligned with the staging schema.
+
+    Parameters
+    ----------
+    xlsx_path:
+        Path to the workbook on disk.
+    sheet:
+        Name of the worksheet to ingest. Defaults to ``TEACH_RECORD``.
+    emit_stdout:
+        When ``True`` (the default), status messages are printed to stdout/stderr
+        to preserve the current CLI behaviour. UI callers can set this to
+        ``False`` to suppress printing while still receiving the return values.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        A tuple of ``(csv_path, file_hash)``. ``csv_path`` is ``None`` when the
+        file has already been processed (duplicate hash).
+    """
+
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
 
     config = _get_table_config(sheet)
@@ -254,17 +274,19 @@ def main(xlsx_path, sheet=DEFAULT_SHEET):
 
     table_name = config["table"]
     if _staging_file_hash_exists(table_name, file_hash):
-        print(
-            f"File hash {file_hash} already exists in staging table {table_name}; skipping.",
-            file=sys.stderr,
-        )
+        if emit_stdout:
+            print(
+                f"File hash {file_hash} already exists in staging table {table_name}; skipping.",
+                file=sys.stderr,
+            )
         return None, file_hash
 
     csv_path = _derive_csv_output_path(xlsx_path, file_hash)
     df.to_csv(csv_path, index=False)
 
-    print(csv_path)
-    print(file_hash)
+    if emit_stdout:
+        print(csv_path)
+        print(file_hash)
     return csv_path, file_hash
 
 
