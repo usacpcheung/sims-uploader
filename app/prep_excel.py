@@ -1,8 +1,10 @@
+import json
 import os
 import re
 import sys
 import hashlib
 
+from functools import lru_cache
 from typing import Iterable
 
 import pandas as pd
@@ -21,16 +23,7 @@ UNNAMED_PAT = re.compile(r"^Unnamed(?::\s*\d+)?$", re.IGNORECASE)
 
 DEFAULT_SHEET = "TEACH_RECORD"
 
-# Table configuration keyed by sheet name so future ingestion flows can reuse the
-# same helpers while pointing at different staging tables.
-TABLE_CONFIG = {
-    "TEACH_RECORD": {
-        "table": "teach_record_raw",
-        "metadata_columns": frozenset(
-            {"id", "file_hash", "batch_id", "source_year", "ingested_at"}
-        ),
-    }
-}
+CONFIG_TABLE = "sheet_ingest_config"
 
 
 class MissingColumnsError(RuntimeError):
@@ -84,10 +77,51 @@ def validate_required_columns(df: pd.DataFrame, required: Iterable[str]) -> list
     return missing
 
 
-def _get_table_config(sheet: str):
+def _loads_json(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+        return json.loads(value)
+    return value
+
+
+@lru_cache(maxsize=1)
+def _get_sheet_config() -> dict[str, dict[str, object]]:
+    conn = pymysql.connect(**DB)
     try:
-        return TABLE_CONFIG[sheet]
-    except KeyError as exc:  # pragma: no cover - guarded against by CLI defaults
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT sheet_name, staging_table, metadata_columns, options
+                  FROM {CONFIG_TABLE}
+                """
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    config: dict[str, dict[str, object]] = {}
+    for row in rows:
+        metadata_columns = _loads_json(row.get("metadata_columns")) or []
+        options = _loads_json(row.get("options")) or {}
+        config[row["sheet_name"]] = {
+            "table": row["staging_table"],
+            "metadata_columns": frozenset(metadata_columns),
+            "options": options,
+        }
+    return config
+
+
+def _get_table_config(sheet: str):
+    config = _get_sheet_config()
+    try:
+        return config[sheet]
+    except KeyError as exc:
         raise ValueError(f"Unsupported sheet name: {sheet!r}") from exc
 
 

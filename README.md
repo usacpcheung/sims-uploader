@@ -20,6 +20,7 @@ sims-uploader/
 │   └── prep_excel.py           # Excel → CSV preprocessor
 │
 ├── sql/
+│   ├── sheet_ingest_config.sql # Configuration table for sheet→staging mappings
 │   └── teach_record_raw.sql    # Example staging table DDL
 │
 ├── uploads/                    # Drop source Excel/CSV files here (git-ignored contents)
@@ -60,6 +61,7 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    ```sql
    CREATE DATABASE SIMSdata CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    USE SIMSdata;
+   SOURCE sql/sheet_ingest_config.sql;
    SOURCE sql/teach_record_raw.sql;
    ```
 
@@ -71,6 +73,20 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. It exits immediately with a helpful message if any required `DB_...` variables are missing.
 
    The preprocessor inspects the target staging table schema (via `information_schema`) to determine which headers are mandatory. Any non-nullable column without a default—excluding ingestion metadata such as `file_hash`—is treated as required. When running via the CLI, the tool prints `Missing required column(s): …` to `stderr` and exits with status code `2`. When `app.prep_excel.main` is imported and called from another service (e.g. a future web UI), a `MissingColumnsError` is raised; the exception exposes a `.missing_columns` tuple containing the absent header names so callers can surface a structured error to end users.
+
+   Sheet configuration (sheet→staging-table mapping, metadata columns, and future options) is stored in `sheet_ingest_config`. Register the worksheets you plan to ingest with simple SQL instead of editing Python:
+
+   ```sql
+   INSERT INTO sheet_ingest_config (sheet_name, staging_table, metadata_columns)
+   VALUES (
+     'TEACH_RECORD',
+     'teach_record_raw',
+     JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at')
+   )
+   ON DUPLICATE KEY UPDATE staging_table = VALUES(staging_table), metadata_columns = VALUES(metadata_columns);
+   ```
+
+   To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
 
 3. **Load into MariaDB**
    ```sql
