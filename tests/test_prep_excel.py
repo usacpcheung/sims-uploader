@@ -20,8 +20,9 @@ from app import prep_excel
 
 
 class _FakeCursor:
-    def __init__(self, rows):
+    def __init__(self, rows, fetchone_result=None):
         self._rows = rows
+        self._fetchone_result = fetchone_result
         self.executed: list[tuple[str, object]] = []
 
     def __enter__(self):
@@ -36,14 +37,36 @@ class _FakeCursor:
     def fetchall(self):
         return self._rows
 
+    def fetchone(self):
+        return self._fetchone_result
+
 
 class _FakeConnection:
-    def __init__(self, rows):
-        self._cursor = _FakeCursor(rows)
+    def __init__(self, rows, fetchone_result=None):
+        self._cursor = _FakeCursor(rows, fetchone_result)
         self.closed = False
 
     def cursor(self, *args, **kwargs):
         return self._cursor
+
+    def close(self):
+        self.closed = True
+
+
+class _SequenceConnection:
+    def __init__(self, cursor_payloads):
+        self._payloads = list(cursor_payloads)
+        self.closed = False
+        self.cursors: list[_FakeCursor] = []
+
+    def cursor(self, *args, **kwargs):
+        if not self._payloads:
+            payload = {"rows": [], "fetchone": None}
+        else:
+            payload = self._payloads.pop(0)
+        cursor = _FakeCursor(payload.get("rows", []), payload.get("fetchone"))
+        self.cursors.append(cursor)
+        return cursor
 
     def close(self):
         self.closed = True
@@ -167,6 +190,44 @@ class PrepExcelSchemaTests(unittest.TestCase):
             },
         )
 
+    def test_get_schema_details_with_injected_connection(self):
+        config_rows = [
+            {
+                "sheet_name": prep_excel.DEFAULT_SHEET,
+                "staging_table": "teach_record_raw",
+                "metadata_columns": json.dumps(["id", "file_hash"]),
+                "required_columns": json.dumps([]),
+                "options": None,
+            }
+        ]
+        column_rows = [
+            {"COLUMN_NAME": "id", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "日期", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "任教老師", "IS_NULLABLE": "YES", "COLUMN_DEFAULT": None},
+            {"COLUMN_NAME": "file_hash", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+        ]
+
+        connection = _SequenceConnection(
+            [
+                {"rows": config_rows},
+                {"rows": column_rows},
+            ]
+        )
+
+        with mock.patch.object(prep_excel.pymysql, "connect") as mock_connect:
+            schema = prep_excel.get_schema_details(connection=connection)
+
+        self.assertFalse(mock_connect.called)
+        self.assertFalse(connection.closed)
+        self.assertEqual(
+            schema,
+            {
+                "order": ["日期", "任教老師"],
+                "required": ["日期", "任教老師"],
+            },
+        )
+        self.assertGreaterEqual(len(connection.cursors), 2)
+
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -199,6 +260,22 @@ class PrepExcelSchemaTests(unittest.TestCase):
             os.remove(excel_path)
 
         self.assertEqual(ctx.exception.missing_columns, ("日期",))
+
+    def test_staging_file_hash_exists_with_injected_connection(self):
+        connection = _SequenceConnection([
+            {"rows": [], "fetchone": (1,)},
+        ])
+
+        with mock.patch.object(prep_excel.pymysql, "connect") as mock_connect:
+            exists = prep_excel._staging_file_hash_exists(
+                "teach_record_raw", "deadbeef", connection=connection
+            )
+
+        self.assertTrue(exists)
+        self.assertFalse(connection.closed)
+        self.assertFalse(mock_connect.called)
+        self.assertEqual(len(connection.cursors), 1)
+        self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
@@ -304,6 +381,51 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertNotIn("教授科目", result.columns)
         self.assertEqual(result["Unnamed: 1"].tolist(), ["Math", ""])
         self.assertEqual(csv_path, captured["path"])
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_threads_connection_parameter(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+        mock_hash_exists,
+    ):
+        connection = object()
+
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["日期"],
+            "required": ["日期"],
+        }
+        mock_read_excel.return_value = pd.DataFrame({"日期": ["2024-01-01"]})
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", return_value=None):
+                prep_excel.main(excel_path, connection=connection)
+        finally:
+            os.remove(excel_path)
+
+        mock_get_table_config.assert_called_once_with(
+            prep_excel.DEFAULT_SHEET, connection=connection, db_settings=None
+        )
+        mock_get_schema_details.assert_called_once_with(
+            prep_excel.DEFAULT_SHEET, connection=connection, db_settings=None
+        )
+        self.assertTrue(mock_hash_exists.called)
+        _, hash_kwargs = mock_hash_exists.call_args
+        self.assertEqual(hash_kwargs["connection"], connection)
+        self.assertIsNone(hash_kwargs["db_settings"])
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")

@@ -5,7 +5,7 @@ import sys
 import hashlib
 
 from functools import lru_cache
-from typing import Iterable
+from typing import Iterable, Mapping, Sequence
 
 import pandas as pd
 import pymysql
@@ -114,21 +114,24 @@ def _loads_json(value):
     return value
 
 
-@lru_cache(maxsize=1)
-def _get_sheet_config() -> dict[str, dict[str, object]]:
-    conn = pymysql.connect(**DB)
-    try:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT sheet_name, staging_table, metadata_columns, required_columns, options
-                  FROM {CONFIG_TABLE}
-                """
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
+def _normalise_db_settings(db_settings: Mapping[str, object] | None) -> dict[str, object]:
+    if db_settings is None:
+        return dict(DB)
+    return dict(db_settings)
 
+
+def _freeze_db_settings(settings: Mapping[str, object]) -> tuple[tuple[str, object], ...]:
+    def _freeze(value):
+        if isinstance(value, Mapping):
+            return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+        if isinstance(value, (list, tuple, set)):
+            return tuple(_freeze(v) for v in value)
+        return value
+
+    return tuple(sorted((key, _freeze(val)) for key, val in settings.items()))
+
+
+def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
     config: dict[str, dict[str, object]] = {}
     for row in rows:
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
@@ -143,18 +146,66 @@ def _get_sheet_config() -> dict[str, dict[str, object]]:
     return config
 
 
-def _get_table_config(sheet: str):
-    config = _get_sheet_config()
+def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
+    with connection.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT sheet_name, staging_table, metadata_columns, required_columns, options
+              FROM {CONFIG_TABLE}
+            """
+        )
+        rows = cur.fetchall()
+    return _parse_sheet_config_rows(rows)
+
+
+@lru_cache(maxsize=8)
+def _get_sheet_config_cached(settings_items: tuple[tuple[str, object], ...]):
+    settings = dict(settings_items)
+    conn = pymysql.connect(**settings)
+    try:
+        return _load_sheet_config(conn)
+    finally:
+        conn.close()
+
+
+def _get_sheet_config(
+    *, connection=None, db_settings: Mapping[str, object] | None = None
+) -> dict[str, dict[str, object]]:
+    if connection is not None:
+        return _load_sheet_config(connection)
+
+    settings = _normalise_db_settings(db_settings)
+    settings_key = _freeze_db_settings(settings)
+    return _get_sheet_config_cached(settings_key)
+
+
+_get_sheet_config.cache_clear = _get_sheet_config_cached.cache_clear  # type: ignore[attr-defined]
+_get_sheet_config.cache_info = _get_sheet_config_cached.cache_info  # type: ignore[attr-defined]
+
+
+def _get_table_config(
+    sheet: str, *, connection=None, db_settings: Mapping[str, object] | None = None
+):
+    config = _get_sheet_config(connection=connection, db_settings=db_settings)
     try:
         return config[sheet]
     except KeyError as exc:
         raise ValueError(f"Unsupported sheet name: {sheet!r}") from exc
-
-
-def _fetch_table_columns(table_name: str) -> list[dict[str, object]]:
-    conn = pymysql.connect(**DB)
+def _fetch_table_columns(
+    table_name: str, *, connection=None, db_settings: Mapping[str, object] | None = None
+) -> list[dict[str, object]]:
+    owns_connection = connection is None
+    settings = None
+    if owns_connection:
+        settings = _normalise_db_settings(db_settings)
+        connection = pymysql.connect(**settings)
+    db_settings_for_query = (
+        settings
+        if settings is not None
+        else (_normalise_db_settings(db_settings) if db_settings is not None else dict(DB))
+    )
     try:
-        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        with connection.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(
                 """
                 SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT
@@ -162,11 +213,13 @@ def _fetch_table_columns(table_name: str) -> list[dict[str, object]]:
                  WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
               ORDER BY ORDINAL_POSITION
                 """,
-                (DB["database"], table_name),
+                (db_settings_for_query["database"], table_name),
             )
             rows = cur.fetchall()
     finally:
-        conn.close()
+        if owns_connection:
+            connection.close()
+
     return [
         {
             "name": row["COLUMN_NAME"],
@@ -177,11 +230,18 @@ def _fetch_table_columns(table_name: str) -> list[dict[str, object]]:
     ]
 
 
-def get_schema_details(sheet: str = DEFAULT_SHEET) -> dict[str, list[str]]:
-    config = _get_table_config(sheet)
+def get_schema_details(
+    sheet: str = DEFAULT_SHEET,
+    *,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> dict[str, list[str]]:
+    config = _get_table_config(sheet, connection=connection, db_settings=db_settings)
     metadata_columns = set(config.get("metadata_columns", ()))
     required_columns_config = set(config.get("required_columns", ()))
-    columns = _fetch_table_columns(config["table"])
+    columns = _fetch_table_columns(
+        config["table"], connection=connection, db_settings=db_settings
+    )
 
     ordered_columns = [
         column["name"] for column in columns if column["name"] not in metadata_columns
@@ -201,8 +261,15 @@ def get_schema_details(sheet: str = DEFAULT_SHEET) -> dict[str, list[str]]:
     return {"order": ordered_columns, "required": required_columns}
 
 
-def get_table_order(sheet: str = DEFAULT_SHEET) -> list[str]:
-    schema = get_schema_details(sheet)
+def get_table_order(
+    sheet: str = DEFAULT_SHEET,
+    *,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> list[str]:
+    schema = get_schema_details(
+        sheet, connection=connection, db_settings=db_settings
+    )
     return schema["order"]
 
 
@@ -211,22 +278,39 @@ def _derive_csv_output_path(xlsx_path: str, file_hash: str) -> str:
     return f"{base}.{file_hash}.csv"
 
 
-def _staging_file_hash_exists(table_name: str, file_hash: str) -> bool:
+def _staging_file_hash_exists(
+    table_name: str,
+    file_hash: str,
+    *,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> bool:
     if not re.fullmatch(r"[A-Za-z0-9_]+", table_name):
         raise ValueError(f"Unsafe table name: {table_name!r}")
-    conn = pymysql.connect(**DB)
+    owns_connection = connection is None
+    if owns_connection:
+        settings = _normalise_db_settings(db_settings)
+        connection = pymysql.connect(**settings)
     try:
-        with conn.cursor() as cur:
+        with connection.cursor() as cur:
             cur.execute(
                 f"SELECT 1 FROM `{table_name}` WHERE file_hash = %s LIMIT 1",
                 (file_hash,),
             )
             return cur.fetchone() is not None
     finally:
-        conn.close()
+        if owns_connection:
+            connection.close()
 
 
-def main(xlsx_path, sheet=DEFAULT_SHEET, *, emit_stdout: bool = True):
+def main(
+    xlsx_path,
+    sheet=DEFAULT_SHEET,
+    *,
+    emit_stdout: bool = True,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+):
     """Preprocess an Excel worksheet into a CSV aligned with the staging schema.
 
     Parameters
@@ -239,6 +323,13 @@ def main(xlsx_path, sheet=DEFAULT_SHEET, *, emit_stdout: bool = True):
         When ``True`` (the default), status messages are printed to stdout/stderr
         to preserve the current CLI behaviour. UI callers can set this to
         ``False`` to suppress printing while still receiving the return values.
+    connection:
+        Optional existing database connection to reuse for configuration lookups
+        and duplicate-hash checks. The caller remains responsible for its
+        lifecycle.
+    db_settings:
+        Override the default database settings when a connection is not
+        supplied. Accepts any mapping supported by :func:`pymysql.connect`.
 
     Returns
     -------
@@ -249,12 +340,16 @@ def main(xlsx_path, sheet=DEFAULT_SHEET, *, emit_stdout: bool = True):
 
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
 
-    config = _get_table_config(sheet)
+    config = _get_table_config(
+        sheet, connection=connection, db_settings=db_settings
+    )
     options = config.get("options") or {}
     rename_last_subject = bool(options.get("rename_last_subject"))
     df = normalize_headers_and_subject(df, rename_last_subject=rename_last_subject)
 
-    schema = get_schema_details(sheet)
+    schema = get_schema_details(
+        sheet, connection=connection, db_settings=db_settings
+    )
     missing = validate_required_columns(df, schema["required"])
     if missing:
         raise MissingColumnsError(missing)
@@ -273,7 +368,12 @@ def main(xlsx_path, sheet=DEFAULT_SHEET, *, emit_stdout: bool = True):
         file_hash = hashlib.sha256(source.read()).hexdigest()
 
     table_name = config["table"]
-    if _staging_file_hash_exists(table_name, file_hash):
+    if _staging_file_hash_exists(
+        table_name,
+        file_hash,
+        connection=connection,
+        db_settings=db_settings,
+    ):
         if emit_stdout:
             print(
                 f"File hash {file_hash} already exists in staging table {table_name}; skipping.",
