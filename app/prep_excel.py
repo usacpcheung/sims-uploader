@@ -3,7 +3,7 @@ import re
 import sys
 import hashlib
 
-from typing import Iterable, Sequence
+from typing import Iterable
 
 import pandas as pd
 import pymysql
@@ -19,16 +19,18 @@ DB = get_db_settings()
 
 UNNAMED_PAT = re.compile(r"^Unnamed(?::\s*\d+)?$", re.IGNORECASE)
 
-# Columns that must be present in the spreadsheet after header normalization.
-# The order matches the teaching record export shared by the school and is a
-# subset of the staging table schema to allow future optional columns.
-REQUIRED_HEADERS: Sequence[str] = (
-    "日期",
-    "任教老師",
-    "學生編號",
-    "姓名",
-    "教授科目",
-)
+DEFAULT_SHEET = "TEACH_RECORD"
+
+# Table configuration keyed by sheet name so future ingestion flows can reuse the
+# same helpers while pointing at different staging tables.
+TABLE_CONFIG = {
+    "TEACH_RECORD": {
+        "table": "teach_record_raw",
+        "metadata_columns": frozenset(
+            {"id", "file_hash", "batch_id", "source_year", "ingested_at"}
+        ),
+    }
+}
 
 
 class MissingColumnsError(RuntimeError):
@@ -82,32 +84,74 @@ def validate_required_columns(df: pd.DataFrame, required: Iterable[str]) -> list
     return missing
 
 
-def get_table_order():
+def _get_table_config(sheet: str):
+    try:
+        return TABLE_CONFIG[sheet]
+    except KeyError as exc:  # pragma: no cover - guarded against by CLI defaults
+        raise ValueError(f"Unsupported sheet name: {sheet!r}") from exc
+
+
+def _fetch_table_columns(table_name: str) -> list[dict[str, object]]:
     conn = pymysql.connect(**DB)
     try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW COLUMNS FROM teach_record_raw")
-            cols = [r[0] for r in cur.fetchall()]
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT
+                  FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+              ORDER BY ORDINAL_POSITION
+                """,
+                (DB["database"], table_name),
+            )
+            rows = cur.fetchall()
     finally:
         conn.close()
-    # Exclude metadata columns; we will set them via SET in LOAD DATA
-    for meta in ("id", "file_hash", "batch_id", "source_year", "ingested_at"):
-        if meta in cols:
-            cols.remove(meta)
-    return cols
+    return [
+        {
+            "name": row["COLUMN_NAME"],
+            "is_nullable": str(row["IS_NULLABLE"]).upper() == "YES",
+            "default": row["COLUMN_DEFAULT"],
+        }
+        for row in rows
+    ]
 
 
-def main(xlsx_path, sheet="TEACH_RECORD"):
+def get_schema_details(sheet: str = DEFAULT_SHEET) -> dict[str, list[str]]:
+    config = _get_table_config(sheet)
+    metadata_columns = set(config.get("metadata_columns", ()))
+    columns = _fetch_table_columns(config["table"])
+
+    ordered_columns = [
+        column["name"] for column in columns if column["name"] not in metadata_columns
+    ]
+    required_columns = [
+        column["name"]
+        for column in columns
+        if column["name"] not in metadata_columns
+        and not column["is_nullable"]
+        and column["default"] is None
+    ]
+    return {"order": ordered_columns, "required": required_columns}
+
+
+def get_table_order(sheet: str = DEFAULT_SHEET) -> list[str]:
+    schema = get_schema_details(sheet)
+    return schema["order"]
+
+
+def main(xlsx_path, sheet=DEFAULT_SHEET):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
     df = normalize_headers_and_subject(df)
 
-    missing = validate_required_columns(df, REQUIRED_HEADERS)
+    schema = get_schema_details(sheet)
+    missing = validate_required_columns(df, schema["required"])
     if missing:
         raise MissingColumnsError(missing)
 
     # Reorder to match table order; add missing columns as empty while preserving
     # any additional headers by appending them after the schema-aligned block.
-    order = get_table_order()
+    order = schema["order"]
     extra_columns = [c for c in df.columns if c not in order]
     for c in order:
         if c not in df.columns:
@@ -131,7 +175,7 @@ if __name__ == "__main__":
         print("Usage: prep_excel.py /path/to/file.xlsx [SheetName]", file=sys.stderr)
         sys.exit(1)
     xlsx = sys.argv[1]
-    sheet = sys.argv[2] if len(sys.argv) > 2 else "TEACH_RECORD"
+    sheet = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_SHEET
     try:
         main(xlsx, sheet)
     except MissingColumnsError as exc:
