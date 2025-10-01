@@ -70,7 +70,7 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    source .venv/bin/activate
    python -m app.prep_excel uploads/your_file.xlsx
    ```
-   Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. It exits immediately with a helpful message if any required `DB_...` variables are missing.
+   Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. Output filenames are suffixed with the spreadsheet's SHA-256 hash (e.g. `your_file.<hash>.csv`) so re-processing the same worksheet never overwrites previous exports. It exits immediately with a helpful message if any required `DB_...` variables are missing.
 
    The preprocessor inspects the target staging table schema (via `information_schema`) to determine which headers are mandatory. Every column that is not flagged as ingestion metadata (e.g. `file_hash`) in the sheet configuration must appear in the spreadsheet. When running via the CLI, the tool prints `Missing required column(s): …` to `stderr` and exits with status code `2`. When `app.prep_excel.main` is imported and called from another service (e.g. a future web UI), a `MissingColumnsError` is raised; the exception exposes a `.missing_columns` tuple containing the absent header names so callers can surface a structured error to end users.
 
@@ -100,6 +100,14 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
    The `options` JSON column toggles sheet-specific behaviours. For example, `rename_last_subject` controls whether unnamed trailing columns are renamed to “教授科目” and other blank unnamed columns are dropped—behaviour that only the prototype teaching-record sheet currently needs. Disable it by setting the flag to `FALSE` when registering other templates.
 
    To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config` with an appropriate `workbook_type`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
+
+   ### Deduplication workflow
+
+   - Each staging table should declare a unique index on `file_hash` (see `sql/teach_record_raw.sql` for an example `UNIQUE KEY`).
+   - `app.prep_excel.main` hashes the original workbook before writing CSV output. If the hash already exists in the destination staging table, the script skips CSV generation and logs a warning to `stderr` so automated callers can gracefully short-circuit their pipelines.
+   - UI consumers should treat a duplicate submission as a no-op: surface a “file already uploaded” notice to the user, keep the previous ingestion metadata untouched, and avoid queuing a second `LOAD DATA INFILE` job.
+
+   When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading.
 
 3. **Load into MariaDB**
    ```sql

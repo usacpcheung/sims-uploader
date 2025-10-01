@@ -1,8 +1,11 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 
@@ -160,6 +163,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.missing_columns, ("日期",))
 
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -168,6 +172,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
             "table": "teach_record_raw",
@@ -188,8 +193,9 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         captured: dict[str, pd.DataFrame] = {}
 
-        def fake_to_csv(self, *_args, **_kwargs):
+        def fake_to_csv(self, path, *_args, **_kwargs):
             captured["df"] = self.copy()
+            captured["path"] = path
             return None
 
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
@@ -198,7 +204,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         try:
             with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
-                prep_excel.main(excel_path)
+                csv_path, _ = prep_excel.main(excel_path)
         finally:
             os.remove(excel_path)
 
@@ -208,7 +214,9 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertNotIn("Unnamed: 1", result.columns)
         self.assertEqual(result["教授科目"].tolist(), ["Math", ""])
         self.assertEqual(result["教師"].tolist(), ["Ms. Chan", "Mr. Lee"])
+        self.assertEqual(csv_path, captured["path"])
 
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -217,6 +225,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
             "table": "teach_record_raw",
@@ -237,8 +246,9 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         captured: dict[str, pd.DataFrame] = {}
 
-        def fake_to_csv(self, *_args, **_kwargs):
+        def fake_to_csv(self, path, *_args, **_kwargs):
             captured["df"] = self.copy()
+            captured["path"] = path
             return None
 
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
@@ -247,7 +257,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         try:
             with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
-                prep_excel.main(excel_path)
+                csv_path, _ = prep_excel.main(excel_path)
         finally:
             os.remove(excel_path)
 
@@ -256,6 +266,106 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertIn("Unnamed: 1", result.columns)
         self.assertNotIn("教授科目", result.columns)
         self.assertEqual(result["Unnamed: 1"].tolist(), ["Math", ""])
+        self.assertEqual(csv_path, captured["path"])
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_uses_unique_output_path_per_file(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+        _mock_hash_exists,
+    ):
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["日期", "任教老師"],
+            "required": ["日期", "任教老師"],
+        }
+        mock_read_excel.return_value = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "任教老師": ["Ms. Chan"],
+            }
+        )
+
+        written_paths = []
+
+        def fake_to_csv(_self, path, *_args, **_kwargs):
+            written_paths.append(path)
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_a, tempfile.NamedTemporaryFile(
+            suffix=".xlsx", delete=False
+        ) as tmp_b:
+            tmp_a.write(b"file-a")
+            tmp_a.flush()
+            tmp_b.write(b"file-b")
+            tmp_b.flush()
+            excel_a = tmp_a.name
+            excel_b = tmp_b.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
+                csv_a, _ = prep_excel.main(excel_a)
+                csv_b, _ = prep_excel.main(excel_b)
+        finally:
+            os.remove(excel_a)
+            os.remove(excel_b)
+
+        self.assertEqual(len(written_paths), 2)
+        self.assertEqual(csv_a, written_paths[0])
+        self.assertEqual(csv_b, written_paths[1])
+        self.assertNotEqual(csv_a, csv_b)
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=True)
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_skips_when_file_hash_already_exists(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        mock_get_schema_details,
+        mock_hash_exists,
+    ):
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["日期", "任教老師"],
+            "required": ["日期", "任教老師"],
+        }
+        mock_read_excel.return_value = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "任教老師": ["Ms. Chan"],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"duplicate")
+            tmp.flush()
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv") as fake_to_csv:
+                csv_path, file_hash = prep_excel.main(excel_path)
+        finally:
+            os.remove(excel_path)
+
+        fake_to_csv.assert_not_called()
+        self.assertIsNone(csv_path)
+        self.assertIsInstance(file_hash, str)
+        mock_hash_exists.assert_called_once()
 
 
 if __name__ == "__main__":

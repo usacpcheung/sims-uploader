@@ -194,6 +194,26 @@ def get_table_order(sheet: str = DEFAULT_SHEET) -> list[str]:
     return schema["order"]
 
 
+def _derive_csv_output_path(xlsx_path: str, file_hash: str) -> str:
+    base, _ = os.path.splitext(xlsx_path)
+    return f"{base}.{file_hash}.csv"
+
+
+def _staging_file_hash_exists(table_name: str, file_hash: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9_]+", table_name):
+        raise ValueError(f"Unsafe table name: {table_name!r}")
+    conn = pymysql.connect(**DB)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT 1 FROM `{table_name}` WHERE file_hash = %s LIMIT 1",
+                (file_hash,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
 def main(xlsx_path, sheet=DEFAULT_SHEET):
     df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
 
@@ -217,15 +237,23 @@ def main(xlsx_path, sheet=DEFAULT_SHEET):
     final_columns = order + extra_columns
     df = df.reindex(columns=final_columns)
 
-    # write CSV next to the xlsx
-    csv_path = os.path.splitext(xlsx_path)[0] + ".csv"
-    df.to_csv(csv_path, index=False)
-
-    # metadata
     with open(xlsx_path, "rb") as source:
         file_hash = hashlib.sha256(source.read()).hexdigest()
+
+    table_name = config["table"]
+    if _staging_file_hash_exists(table_name, file_hash):
+        print(
+            f"File hash {file_hash} already exists in staging table {table_name}; skipping.",
+            file=sys.stderr,
+        )
+        return None, file_hash
+
+    csv_path = _derive_csv_output_path(xlsx_path, file_hash)
+    df.to_csv(csv_path, index=False)
+
     print(csv_path)
     print(file_hash)
+    return csv_path, file_hash
 
 
 if __name__ == "__main__":
