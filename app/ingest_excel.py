@@ -5,8 +5,15 @@ import argparse
 import csv
 import logging
 import os
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Mapping
+
+if __package__ in {None, ""}:  # pragma: no cover - exercised via dedicated unit test
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 import pymysql
 

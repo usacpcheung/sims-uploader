@@ -1,4 +1,5 @@
 import os
+import runpy
 import sys
 import tempfile
 import unittest
@@ -168,6 +169,32 @@ class IngestExcelTests(unittest.TestCase):
         self.assertTrue(connection.begun)
         self.assertTrue(connection.rolled_back)
         self.assertFalse(connection.committed)
+
+    def test_script_mode_bootstrap_adds_project_root(self):
+        module_path = ingest_excel.__file__
+        project_root = os.path.dirname(os.path.dirname(module_path))
+        original_sys_path = list(sys.path)
+
+        saved_modules = {
+            name: sys.modules[name]
+            for name in list(sys.modules)
+            if name == "app" or name.startswith("app.")
+        }
+        for name in list(saved_modules):
+            sys.modules.pop(name, None)
+
+        try:
+            runpy.run_path(
+                module_path,
+                init_globals={"__name__": "ingest_excel_script_test", "__package__": None},
+            )
+            self.assertIn(project_root, sys.path)
+        finally:
+            sys.path[:] = original_sys_path
+            for name in list(sys.modules):
+                if name == "app" or name.startswith("app."):
+                    del sys.modules[name]
+            sys.modules.update(saved_modules)
 
 
 if __name__ == "__main__":
