@@ -10,8 +10,8 @@ from typing import Iterable, Mapping
 
 import pymysql
 
-from .config import get_db_settings
-from . import prep_excel
+from app.config import get_db_settings
+from app import prep_excel
 
 LOGGER = logging.getLogger(__name__)
 
