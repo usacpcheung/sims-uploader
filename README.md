@@ -17,7 +17,8 @@ sims-uploader/
 ├── app/
 │   ├── __init__.py             # Makes the ``app`` package importable
 │   ├── config.py               # Centralized environment loading helpers
-│   └── prep_excel.py           # Excel → CSV preprocessor
+│   ├── prep_excel.py           # Excel → CSV preprocessor
+│   └── ingest_excel.py         # CSV loader that bulk-ingests into staging tables
 │
 ├── sql/
 │   ├── sheet_ingest_config.sql # Configuration table for sheet→staging mappings
@@ -118,15 +119,23 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading. Programmatic integrations can call `app.prep_excel.main(..., emit_stdout=False)` to suppress those prints while still receiving the `(csv_path, file_hash)` tuple. Services that own their database pooling can also provide `connection=` (or pass alternative `db_settings=`) so the preprocessor reuses existing credentials instead of opening new connections for each helper call.
 
-3. **Load into MariaDB**
-   ```sql
-   LOAD DATA INFILE '/var/lib/mysql-files/input.csv'
-   INTO TABLE teach_record_raw
-   FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-   LINES TERMINATED BY '\n'
-   IGNORE 1 LINES
-   SET file_hash = '...', batch_id = UUID(), source_year = 2025, ingested_at = NOW();
+3. **Bulk-load the cleaned CSV**
+   ```bash
+   python -m app.ingest_excel uploads/your_file.xlsx TEACH_RECORD --source-year 2024
    ```
+   The loader reuses the preprocessor so duplicate uploads are detected by file
+   hash before any database work begins. When a new hash is encountered the
+   command bulk loads the generated CSV with `LOAD DATA LOCAL INFILE`, filling
+   the `file_hash`, `batch_id`, `source_year`, and `ingested_at` metadata
+   columns inside a single transaction. Provide `--batch-id` when you need to
+   associate several uploads with the same identifier; otherwise a database-side
+   `UUID()` is generated.
+
+   > **Note:** MariaDB/MySQL must allow local file loads. Set
+   > `local_infile=1` on the server (e.g. in `mysqld.cnf`) and ensure clients
+   > enable it too (`allow_local_infile=1`). The CLI passes the appropriate
+   > PyMySQL flags automatically; if you connect through other tools, remember
+   > to enable the same option.
 
 ---
 

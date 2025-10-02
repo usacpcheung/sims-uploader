@@ -1,0 +1,174 @@
+import os
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_USER", "user")
+os.environ.setdefault("DB_PASSWORD", "password")
+os.environ.setdefault("DB_NAME", "test_db")
+os.environ.setdefault("DB_CHARSET", "utf8mb4")
+
+from app import ingest_excel
+
+
+class _Cursor:
+    def __init__(self, *, rowcount: int = 0, exc: Exception | None = None):
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
+        self.rowcount = rowcount
+        self._exc = exc
+
+    def __enter__(self):
+        if self._exc:
+            raise self._exc
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        if self._exc:
+            raise self._exc
+        self.executed.append((query, tuple(params or ())))
+
+
+class _Connection:
+    def __init__(self, cursor: _Cursor):
+        self._cursor = cursor
+        self.closed = False
+        self.begun = False
+        self.committed = False
+        self.rolled_back = False
+
+    def cursor(self):
+        return self._cursor
+
+    def begin(self):
+        self.begun = True
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+    def close(self):
+        self.closed = True
+
+
+class IngestExcelTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch("app.ingest_excel.datetime")
+        self.addCleanup(patcher.stop)
+        self.mock_datetime = patcher.start()
+        self.now = datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc)
+        self.mock_datetime.now.return_value = self.now
+        self.mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+    def _create_csv(self, header):
+        temp = tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8")
+        temp.write(",".join(header) + "\n")
+        temp.write("value1,value2\n")
+        temp.flush()
+        temp.close()
+        self.addCleanup(lambda: os.remove(temp.name))
+        return temp.name
+
+    def test_main_loads_csv_into_table(self):
+        header = ["日期", "任教老師"]
+        csv_path = self._create_csv(header)
+
+        fake_cursor = _Cursor(rowcount=2)
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")) as prep_main, mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ) as get_config, mock.patch.object(
+            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql, "connect", return_value=connection
+        ) as connect:
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        prep_main.assert_called_once_with(
+            "workbook.xlsx", ingest_excel.prep_excel.DEFAULT_SHEET, emit_stdout=False, db_settings=None
+        )
+        get_config.assert_called_once()
+        get_schema.assert_called_once()
+        connect.assert_called_once()
+        args, kwargs = connect.call_args
+        self.assertIn("allow_local_infile", kwargs)
+        self.assertTrue(kwargs["allow_local_infile"])
+        self.assertIn("client_flag", kwargs)
+        self.assertEqual(kwargs["client_flag"], ingest_excel.pymysql.constants.CLIENT.LOCAL_FILES)
+
+        self.assertTrue(connection.begun)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+
+        self.assertEqual(len(fake_cursor.executed), 1)
+        query, params = fake_cursor.executed[0]
+        column_list = ", ".join(f"`{name}`" for name in header)
+        expected_query = (
+            "LOAD DATA LOCAL INFILE %s INTO TABLE `teach_record_raw` "
+            "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
+            "LINES TERMINATED BY '\n' IGNORE 1 LINES "
+            f"({column_list}) "
+            "SET file_hash = %s, batch_id = COALESCE(%s, UUID()), source_year = %s, ingested_at = %s"
+        )
+        self.assertEqual(query, expected_query)
+        self.assertEqual(params[0], csv_path)
+        self.assertEqual(params[1:], ("abc", None, "2024", self.now))
+
+    def test_main_skips_when_duplicate(self):
+        with mock.patch.object(
+            ingest_excel.prep_excel, "main", return_value=(None, "abc")
+        ), mock.patch.object(
+            ingest_excel.pymysql, "connect"
+        ) as connect:
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+        connect.assert_not_called()
+
+    def test_main_header_mismatch_raises(self):
+        csv_path = self._create_csv(["日期", "任教老師"])
+        with mock.patch.object(
+            ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "get_schema_details", return_value={"order": ["A", "B"]}
+        ), mock.patch.object(
+            ingest_excel.pymysql, "connect"
+        ) as connect:
+            with self.assertRaises(ValueError):
+                ingest_excel.main("workbook.xlsx", source_year="2024")
+        connect.assert_not_called()
+
+    def test_main_rolls_back_on_error(self):
+        header = ["日期", "任教老師"]
+        csv_path = self._create_csv(header)
+        cursor_exc = RuntimeError("boom")
+        fake_cursor = _Cursor(exc=cursor_exc)
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
+        ), mock.patch.object(
+            ingest_excel.pymysql, "connect", return_value=connection
+        ):
+            with self.assertRaises(RuntimeError):
+                ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        self.assertTrue(connection.begun)
+        self.assertTrue(connection.rolled_back)
+        self.assertFalse(connection.committed)
+
+
+if __name__ == "__main__":
+    unittest.main()
