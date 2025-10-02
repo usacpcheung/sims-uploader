@@ -70,10 +70,13 @@ class IngestExcelTests(unittest.TestCase):
         self.mock_datetime.now.return_value = self.now
         self.mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
 
-    def _create_csv(self, header):
+    def _create_csv(self, header, rows=None):
         temp = tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8")
         temp.write(",".join(header) + "\n")
-        temp.write("value1,value2\n")
+        if rows is None:
+            rows = [[f"value{i+1}" for i in range(len(header))]]
+        for row in rows:
+            temp.write(",".join(row) + "\n")
         temp.flush()
         temp.close()
         self.addCleanup(lambda: os.remove(temp.name))
@@ -217,6 +220,35 @@ class IngestExcelTests(unittest.TestCase):
         load_query, load_params = fake_cursor.executed[1]
         column_list = ", ".join(f"`{name}`" for name in header)
         self.assertIn(column_list, load_query)
+        self.assertEqual(load_params[0], csv_path)
+
+    def test_main_loads_long_feedback_text(self):
+        header = ["教學跟進/回饋"]
+        long_feedback = "教學反思" * 150  # > 255 characters
+        csv_path = self._create_csv(header, rows=[[long_feedback]])
+
+        fake_cursor = _Cursor(rowcount=1)
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(
+            ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": header, "required": header},
+        ), mock.patch.object(
+            ingest_excel.pymysql, "connect", return_value=connection
+        ):
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        self.assertTrue(connection.begun)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+        self.assertEqual(len(fake_cursor.executed), 1)
+        load_query, load_params = fake_cursor.executed[0]
+        self.assertIn("`教學跟進/回饋`", load_query)
         self.assertEqual(load_params[0], csv_path)
 
     def test_script_mode_bootstrap_adds_project_root(self):

@@ -109,6 +109,8 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    The `required_columns` JSON array lets you explicitly state which business headers must be present for a given workbook type. Any other non-metadata columns can be treated as optional (for example, year-specific additions). The `options` JSON column toggles sheet-specific behaviours. For example, `rename_last_subject` controls whether unnamed trailing columns are renamed to “教授科目” and other blank unnamed columns are dropped—behaviour that only the prototype teaching-record sheet currently needs. Disable it by setting the flag to `FALSE` when registering other templates.
 
+   Narrative columns such as “自定教學重點”, “備註”, and “教學跟進/回饋” are provisioned as `TEXT` so that multi-paragraph feedback is not truncated during `LOAD DATA`. Run `SOURCE sql/migrations/20241009_extend_teach_record_text.sql;` against existing environments before loading workbooks that rely on the wider fields.
+
    To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config` with an appropriate `workbook_type`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
 
    ### Deduplication workflow
