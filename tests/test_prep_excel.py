@@ -539,8 +539,8 @@ class PrepExcelMainTests(unittest.TestCase):
             {
                 "日期": ["2024-01-01"],
                 "任教老師": ["Teacher"],
+                "教學跟進/回饋": ["Feedback"],
                 "2023 Amount": ["10"],
-                "Other Value": ["20"],
             }
         )
 
@@ -570,10 +570,7 @@ class PrepExcelMainTests(unittest.TestCase):
             with open(csv_path, encoding="utf-8") as csv_file:
                 header_line = csv_file.readline().strip()
 
-        self.assertEqual(
-            header_line,
-            "日期,任教老師,_2023_amount,other_value",
-        )
+        self.assertEqual(header_line, "日期,任教老師,教學跟進_回饋,_2023_amount")
 
 
 if __name__ == "__main__":

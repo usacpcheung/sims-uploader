@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import MutableSet
 
 _MAX_IDENTIFIER_LENGTH = 64
-_IDENTIFIER_RE = re.compile(r"[^0-9a-z_]")
 _MULTIPLE_UNDERSCORES_RE = re.compile(r"_+")
 
 
@@ -39,8 +39,19 @@ def sanitize_identifier(
         Replacement used when the sanitized value would otherwise be empty.
     """
 
-    value = "" if name is None else str(name).strip().lower()
-    value = _IDENTIFIER_RE.sub("_", value)
+    value = "" if name is None else str(name)
+    value = unicodedata.normalize("NFKC", value).strip()
+
+    sanitized_chars: list[str] = []
+    for char in value:
+        category = unicodedata.category(char)
+        if category.startswith(("L", "N")):
+            sanitized_chars.append(char.lower())
+        elif category.startswith(("Z", "P", "S")):
+            sanitized_chars.append("_")
+        # Control and other categories are skipped entirely.
+
+    value = "".join(sanitized_chars)
     value = _MULTIPLE_UNDERSCORES_RE.sub("_", value)
     value = value.strip("_")
 

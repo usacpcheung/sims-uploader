@@ -222,6 +222,57 @@ class IngestExcelTests(unittest.TestCase):
         self.assertIn(column_list, load_query)
         self.assertEqual(load_params[0], csv_path)
 
+    def test_main_reuses_sanitized_cjk_column_without_alter(self):
+        base_columns = ["日期", "任教老師"]
+        sanitized_extra = "教學跟進_回饋"
+        header = base_columns + [sanitized_extra]
+        csv_path = self._create_csv(header)
+
+        first_cursor = _Cursor(rowcount=1)
+        second_cursor = _Cursor(rowcount=1)
+        first_connection = _Connection(first_cursor)
+        second_connection = _Connection(second_cursor)
+
+        schema_sequence = [
+            {"order": base_columns, "required": base_columns},
+            {"order": header, "required": base_columns},
+            {"order": header, "required": base_columns},
+            {"order": header, "required": base_columns},
+        ]
+
+        with mock.patch.object(
+            ingest_excel.prep_excel,
+            "main",
+            return_value=(csv_path, "abc"),
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            side_effect=schema_sequence,
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql,
+            "connect",
+            side_effect=[first_connection, second_connection],
+        ):
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        self.assertEqual(get_schema.call_count, 4)
+
+        self.assertGreaterEqual(len(first_cursor.executed), 2)
+        alter_query, _ = first_cursor.executed[0]
+        self.assertIn("ALTER TABLE `teach_record_raw` ADD COLUMN `教學跟進_回饋` TEXT NULL", alter_query)
+        load_query_first, load_params_first = first_cursor.executed[1]
+        self.assertIn("`教學跟進_回饋`", load_query_first)
+        self.assertEqual(load_params_first[0], csv_path)
+
+        self.assertEqual(len(second_cursor.executed), 1)
+        second_query, second_params = second_cursor.executed[0]
+        self.assertNotIn("ALTER TABLE", second_query)
+        self.assertIn("`教學跟進_回饋`", second_query)
+        self.assertEqual(second_params[0], csv_path)
+
     def test_main_loads_long_feedback_text(self):
         header = ["教學跟進/回饋"]
         long_feedback = "教學反思" * 150  # > 255 characters
