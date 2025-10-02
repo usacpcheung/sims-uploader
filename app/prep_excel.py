@@ -137,11 +137,13 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
+        column_mappings = _loads_json(row.get("column_mappings")) or {}
         config[row["sheet_name"]] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
             "required_columns": frozenset(required_columns),
             "options": options,
+            "column_mappings": column_mappings,
         }
     return config
 
@@ -150,7 +152,12 @@ def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
     with connection.cursor(pymysql.cursors.DictCursor) as cur:
         cur.execute(
             f"""
-            SELECT sheet_name, staging_table, metadata_columns, required_columns, options
+            SELECT sheet_name,
+                   staging_table,
+                   metadata_columns,
+                   required_columns,
+                   column_mappings,
+                   options
               FROM {CONFIG_TABLE}
             """
         )
