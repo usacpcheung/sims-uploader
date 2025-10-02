@@ -33,5 +33,5 @@ CREATE TABLE `teach_record_raw` (
   `batch_id` CHAR(36) NULL,
   `source_year` INT NULL,
   `ingested_at` DATETIME NOT NULL,
-  UNIQUE KEY uniq_teach_record_file_hash (file_hash)
+  KEY idx_teach_record_file_hash (file_hash)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

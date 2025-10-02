@@ -90,12 +90,13 @@ class IngestExcelTests(unittest.TestCase):
         self.addCleanup(self.hash_exists_patcher.stop)
         self.mock_hash_exists = self.hash_exists_patcher.start()
 
-    def _create_csv(self, header, row=None):
+    def _create_csv(self, header, rows=None):
         temp = tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8")
         temp.write(",".join(header) + "\n")
-        if row is None:
-            row = [f"value{i+1}" for i in range(len(header))]
-        temp.write(",".join(row) + "\n")
+        if rows is None:
+            rows = [[f"value{i+1}" for i in range(len(header))]]
+        for row in rows:
+            temp.write(",".join(row) + "\n")
         temp.flush()
         temp.close()
         self.addCleanup(lambda: os.remove(temp.name))
@@ -198,6 +199,46 @@ class IngestExcelTests(unittest.TestCase):
         self.assertEqual(params[0], csv_path)
         self.assertEqual(params[1:4], ("abc", "batch-1", "2024"))
         self.assertEqual(params[4], self.now)
+
+    def test_main_logs_rowcount_for_multi_row_csv(self):
+        header = ["日期", "任教老師"]
+        rows = [["2024-05-01", "Teacher A"], ["2024-05-02", "Teacher B"]]
+        csv_path = self._create_csv(header, rows=rows)
+
+        fake_cursor = _Cursor(rowcount=len(rows), fetchone_results=[(1,)])
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(
+            ingest_excel.prep_excel,
+            "main",
+            return_value=(csv_path, "abc"),
+        ) as prep_main, mock.patch.object(
+            ingest_excel.prep_excel,
+            "_get_table_config",
+            return_value={"table": "teach_record_raw"},
+        ) as get_config, mock.patch.object(
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": header},
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql,
+            "connect",
+            return_value=connection,
+        ) as connect, self.assertLogs(ingest_excel.LOGGER, level="INFO") as captured_logs:
+            ingest_excel.main("workbook.xlsx", source_year="2024", batch_id="manual-batch")
+
+        prep_main.assert_called_once()
+        get_config.assert_called_once()
+        get_schema.assert_called_once()
+        connect.assert_called_once()
+
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+
+        self.assertTrue(
+            any("Loaded 2 rows into teach_record_raw" in message for message in captured_logs.output),
+            captured_logs.output,
+        )
 
     def test_main_skips_when_duplicate(self):
         with mock.patch.object(
