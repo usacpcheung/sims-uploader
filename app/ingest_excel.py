@@ -60,7 +60,7 @@ def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str,
         settings.update(overrides)
     settings.update(
         {
-            "allow_local_infile": True,
+            "local_infile": True,
             "client_flag": pymysql.constants.CLIENT.LOCAL_FILES,
         }
     )

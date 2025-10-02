@@ -104,8 +104,8 @@ class IngestExcelTests(unittest.TestCase):
         self.assertEqual(get_schema.call_count, 2)
         connect.assert_called_once()
         args, kwargs = connect.call_args
-        self.assertIn("allow_local_infile", kwargs)
-        self.assertTrue(kwargs["allow_local_infile"])
+        self.assertIn("local_infile", kwargs)
+        self.assertTrue(kwargs["local_infile"])
         self.assertIn("client_flag", kwargs)
         self.assertEqual(kwargs["client_flag"], ingest_excel.pymysql.constants.CLIENT.LOCAL_FILES)
 

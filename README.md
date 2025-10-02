@@ -133,7 +133,7 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    > **Note:** MariaDB/MySQL must allow local file loads. Set
    > `local_infile=1` on the server (e.g. in `mysqld.cnf`) and ensure clients
-   > enable it too (`allow_local_infile=1`). The CLI passes the appropriate
+   > enable it too (`local_infile=1`). The CLI passes the appropriate
    > PyMySQL flags automatically; if you connect through other tools, remember
    > to enable the same option.
 
