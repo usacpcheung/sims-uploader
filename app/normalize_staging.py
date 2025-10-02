@@ -210,10 +210,46 @@ def insert_normalized_rows(
     return len(prepared)
 
 
+def mark_staging_rows_processed(
+    connection,
+    staging_table: str,
+    row_ids: Sequence[int],
+    *,
+    file_hash: str,
+    processed_at: _dt.datetime | None = None,
+) -> _dt.datetime | None:
+    """Mark staging rows as processed for the given file hash.
+
+    The previous implementation built an ``IN`` clause for every processed row
+    and passed each identifier as an update parameter. This version reuses the
+    ``file_hash`` that scoped the batch fetch, letting the database locate the
+    relevant rows directly.
+    """
+
+    if not row_ids:
+        return None
+
+    if processed_at is None:
+        processed_at = _dt.datetime.now(_dt.timezone.utc)
+
+    sql = (
+        f"UPDATE `{staging_table}` "
+        "SET processed_at = %s "
+        "WHERE file_hash = %s AND processed_at IS NULL"
+    )
+    params = (processed_at, file_hash)
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+
+    return processed_at
+
+
 __all__ = [
     "BUSINESS_COLUMNS",
     "TableConfig",
     "build_insert_statement",
     "insert_normalized_rows",
+    "mark_staging_rows_processed",
     "prepare_rows",
 ]

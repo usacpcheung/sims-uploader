@@ -13,6 +13,7 @@ from app import normalize_staging
 class _Cursor:
     def __init__(self):
         self.executed: list[tuple[str, list[tuple[object, ...]]]] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
         self.rowcount = 0
 
     def __enter__(self):
@@ -20,6 +21,9 @@ class _Cursor:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+    def execute(self, sql, params=None):
+        self.execute_calls.append((sql, tuple(params or ())))
 
     def executemany(self, sql, params):
         self.executed.append((sql, params))
@@ -140,3 +144,33 @@ def test_insert_normalized_rows_uses_identity_columns(sample_row, column_mapping
     assert row_values[1] == sample_row["file_hash"]
     assert row_values[ordered_columns.index("日期")] == dt.date(2024, 5, 1)
     assert row_values[ordered_columns.index("上課時數")] == Decimal("1.5")
+
+
+def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+    processed_at = dt.datetime(2024, 5, 3, 8, 30, tzinfo=dt.timezone.utc)
+
+    class _FrozenDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # pragma: no cover - exercised via monkeypatch
+            assert tz == dt.timezone.utc
+            return processed_at
+
+    monkeypatch.setattr(normalize_staging._dt, "datetime", _FrozenDateTime)
+
+    timestamp = normalize_staging.mark_staging_rows_processed(
+        connection,
+        "teach_record_raw",
+        [101, 102],
+        file_hash="hash-123",
+    )
+
+    assert timestamp == processed_at
+    assert cursor.execute_calls == [
+        (
+            "UPDATE `teach_record_raw` SET processed_at = %s "
+            "WHERE file_hash = %s AND processed_at IS NULL",
+            (processed_at, "hash-123"),
+        )
+    ]
