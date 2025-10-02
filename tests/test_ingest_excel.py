@@ -90,10 +90,12 @@ class IngestExcelTests(unittest.TestCase):
         self.addCleanup(self.hash_exists_patcher.stop)
         self.mock_hash_exists = self.hash_exists_patcher.start()
 
-    def _create_csv(self, header):
+    def _create_csv(self, header, row=None):
         temp = tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8")
         temp.write(",".join(header) + "\n")
-        temp.write("value1,value2\n")
+        if row is None:
+            row = [f"value{i+1}" for i in range(len(header))]
+        temp.write(",".join(row) + "\n")
         temp.flush()
         temp.close()
         self.addCleanup(lambda: os.remove(temp.name))
@@ -153,6 +155,49 @@ class IngestExcelTests(unittest.TestCase):
             params[1:],
             ("abc", "12345678-1234-5678-1234-567812345678", "2024", self.now),
         )
+
+    def test_main_ignores_trailing_csv_columns(self):
+        schema_header = ["日期", "任教老師"]
+        full_header = schema_header + ["Extra A", "Extra B"]
+        csv_path = self._create_csv(full_header)
+
+        fake_cursor = _Cursor(rowcount=2, fetchone_results=[(1,)])
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(
+            ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
+        ) as prep_main, mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ) as get_config, mock.patch.object(
+            ingest_excel.prep_excel, "get_schema_details", return_value={"order": schema_header}
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql, "connect", return_value=connection
+        ) as connect:
+            ingest_excel.main("workbook.xlsx", source_year="2024", batch_id="batch-1")
+
+        prep_main.assert_called_once()
+        get_config.assert_called_once()
+        get_schema.assert_called_once()
+        connect.assert_called_once()
+
+        self.assertTrue(connection.begun)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+
+        self.assertEqual(len(fake_cursor.executed), 2)
+        query, params = fake_cursor.executed[1]
+        column_list = ", ".join(["`日期`", "`任教老師`", "@unused_0", "@unused_1"])
+        expected_query = (
+            "LOAD DATA LOCAL INFILE %s INTO TABLE `teach_record_raw` "
+            "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
+            "LINES TERMINATED BY '\n' IGNORE 1 LINES "
+            f"({column_list}) "
+            "SET file_hash = %s, batch_id = %s, source_year = %s, ingested_at = %s"
+        )
+        self.assertEqual(query, expected_query)
+        self.assertEqual(params[0], csv_path)
+        self.assertEqual(params[1:4], ("abc", "batch-1", "2024"))
+        self.assertEqual(params[4], self.now)
 
     def test_main_skips_when_duplicate(self):
         with mock.patch.object(
