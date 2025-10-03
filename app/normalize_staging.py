@@ -215,6 +215,7 @@ def ensure_normalized_schema(
     connection,
     table: str,
     column_mappings: Mapping[str, str],
+    column_types: Mapping[str, str] | None = None,
 ) -> bool:
     """Ensure the normalized table contains columns for every mapping key."""
 
@@ -228,7 +229,15 @@ def ensure_normalized_schema(
             continue
         if column in existing_columns:
             continue
-        column_type = _COLUMN_TYPE_OVERRIDES.get(column, "VARCHAR(255) NULL")
+        column_type = None
+        if column_types:
+            column_type = column_types.get(column)
+            if column_type is not None:
+                column_type = str(column_type).strip()
+        if not column_type:
+            column_type = _COLUMN_TYPE_OVERRIDES.get(column)
+        if not column_type:
+            column_type = "VARCHAR(255) NULL"
         additions.append((column, column_type))
 
     if not additions:

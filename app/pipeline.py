@@ -114,6 +114,7 @@ def run_pipeline(
     column_mappings = table_config.get("column_mappings")
     if not column_mappings:
         column_mappings = None
+    column_types = table_config.get("column_types") or {}
 
     settings = ingest_excel._get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
@@ -123,7 +124,7 @@ def run_pipeline(
             staging_rows, column_mappings
         )
         normalize_staging.ensure_normalized_schema(
-            connection, normalized_table, resolved_mappings
+            connection, normalized_table, resolved_mappings, column_types
         )
 
         connection.begin()

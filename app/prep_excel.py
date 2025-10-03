@@ -153,6 +153,20 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
             if option_value is not None:
                 normalized_table = option_value
                 normalized_table_source = "explicit"
+        column_types: dict[str, str] = {}
+        if isinstance(options, Mapping):
+            raw_column_types = options.get("column_types")
+            if isinstance(raw_column_types, Mapping):
+                for key, value in raw_column_types.items():
+                    key_text = str(key).strip()
+                    if not key_text:
+                        continue
+                    if value is None:
+                        continue
+                    type_text = str(value).strip()
+                    if not type_text:
+                        continue
+                    column_types[key_text] = type_text
         if normalized_table is None:
             staging_table = row.get("staging_table")
             if isinstance(staging_table, str):
@@ -177,6 +191,7 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
             "options": options,
             "column_mappings": column_mappings,
             "normalized_table": normalized_table,
+            "column_types": column_types,
         }
         normalized_sources[sheet_name] = normalized_table_source
     return config
@@ -303,6 +318,7 @@ def _ensure_staging_columns(
 ) -> bool:
     table_name = config["table"]
     metadata_columns = set(config.get("metadata_columns", ()))
+    column_types: Mapping[str, str] = config.get("column_types") or {}
 
     owns_connection = connection is None
     if owns_connection:
@@ -336,8 +352,13 @@ def _ensure_staging_columns(
 
         with connection.cursor() as cursor:
             for column in missing_columns:
+                column_type = column_types.get(column)
+                if column_type is not None:
+                    column_type = str(column_type).strip()
+                if not column_type:
+                    column_type = "VARCHAR(255) NULL"
                 cursor.execute(
-                    f"ALTER TABLE {_quote_identifier(table_name)} ADD COLUMN {_quote_identifier(column)} VARCHAR(255) NULL"
+                    f"ALTER TABLE {_quote_identifier(table_name)} ADD COLUMN {_quote_identifier(column)} {column_type}"
                 )
         connection.commit()
         return True

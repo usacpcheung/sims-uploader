@@ -496,7 +496,7 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
             "source_year": "2024",
             "ingested_at": "2024-09-01T00:00:00",
             "姓名": "Student",
-            "新欄位": "value",
+            "教學跟進/回饋": "Long feedback text",
         }
     ]
     staging_result = ingest_excel.StagingLoadResult(
@@ -525,6 +525,7 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
             "table": "teach_record_raw",
             "normalized_table": "teach_record_normalized",
             "column_mappings": None,
+            "column_types": {"教學跟進/回饋": "TEXT NULL"},
         },
     )
 
@@ -533,9 +534,10 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
 
     ensured = {}
 
-    def fake_ensure(conn, table, mappings):
+    def fake_ensure(conn, table, mappings, column_types):
         ensured["table"] = table
         ensured["columns"] = tuple(mappings.keys())
+        ensured["column_types"] = dict(column_types)
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -566,10 +568,14 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
     assert ensured["table"] == "teach_record_normalized"
-    assert "新欄位" in ensured["columns"]
+    assert "教學跟進/回饋" in ensured["columns"]
+    assert ensured["column_types"]["教學跟進/回饋"] == "TEXT NULL"
     assert inserted["table"] == "teach_record_normalized"
-    assert inserted["column_mappings"]["新欄位"] == "新欄位"
-    assert inserted["rows"][0]["新欄位"] == "value"
+    assert inserted["column_mappings"]["教學跟進/回饋"] == "教學跟進/回饋"
+    assert (
+        inserted["rows"][0]["教學跟進/回饋"]
+        == "Long feedback text"
+    )
     assert result.normalized_rows == 1
     assert connection.committed
 

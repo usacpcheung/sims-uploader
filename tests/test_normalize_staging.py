@@ -174,13 +174,37 @@ def test_ensure_normalized_schema_alters_missing_columns(monkeypatch, column_map
     )
 
     changed = normalize_staging.ensure_normalized_schema(
-        connection, "teach_record_normalized", column_mappings
+        connection, "teach_record_normalized", column_mappings, {}
     )
 
     assert changed is True
     assert cursor.execute_calls
     alter_statements = [sql for sql, _ in cursor.execute_calls if sql.startswith("ALTER TABLE")]
     assert alter_statements
+
+
+def test_ensure_normalized_schema_uses_column_type_overrides(monkeypatch):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    monkeypatch.setattr(
+        normalize_staging,
+        "_fetch_existing_columns",
+        lambda conn, table: ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"],
+    )
+
+    mappings = {"教學跟進/回饋": "教學跟進/回饋"}
+    changed = normalize_staging.ensure_normalized_schema(
+        connection,
+        "teach_record_normalized",
+        mappings,
+        {"教學跟進/回饋": "TEXT NULL"},
+    )
+
+    assert changed is True
+    alter_statements = [sql for sql, _ in cursor.execute_calls if sql.startswith("ALTER TABLE")]
+    assert alter_statements
+    assert "TEXT NULL" in alter_statements[0]
 
 
 def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):

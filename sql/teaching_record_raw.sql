@@ -28,7 +28,7 @@ CREATE TABLE `teach_record_raw` (
   `練習` VARCHAR(100) NULL,
   `上課時數` VARCHAR(100) NULL,
   `備註` VARCHAR(100) NULL,
-  `教學跟進/回饋` VARCHAR(255) NULL,
+  `教學跟進/回饋` TEXT NULL,
   `file_hash` CHAR(64) NOT NULL,
   `batch_id` CHAR(36) NULL,
   `source_year` INT NULL,

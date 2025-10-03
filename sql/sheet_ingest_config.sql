@@ -91,7 +91,8 @@ VALUES (
     ),
     JSON_OBJECT(
         'rename_last_subject', true,
-        'normalized_table', 'teach_record_normalized'
+        'normalized_table', 'teach_record_normalized',
+        'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
     )
 )
 ON DUPLICATE KEY UPDATE

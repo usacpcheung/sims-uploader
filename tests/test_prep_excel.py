@@ -366,6 +366,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
             "table": "teach_record_raw",
             "metadata_columns": frozenset({"file_hash", "batch_id", "source_year", "ingested_at"}),
             "options": {},
+            "column_types": {},
         }
         mock_get_table_config.return_value = config
 
@@ -408,6 +409,58 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(mock_fetch_columns.call_count, 2)
         self.assertEqual(captured["columns"], ["日期", "任教老師", "新欄位"])
         self.assertEqual(csv_path, captured["path"])
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_adds_missing_staging_columns_with_type_override(
+        self,
+        mock_read_excel,
+        mock_fetch_columns,
+        mock_get_table_config,
+        _mock_hash_exists,
+    ):
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "教學跟進/回饋": ["feedback"],
+            }
+        )
+        mock_read_excel.return_value = df
+
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset({"file_hash", "batch_id", "source_year", "ingested_at"}),
+            "options": {},
+            "column_types": {"教學跟進/回饋": "TEXT NULL"},
+        }
+        mock_get_table_config.return_value = config
+
+        existing = [
+            {"name": "日期", "is_nullable": True, "default": None},
+        ]
+        expanded = existing + [
+            {"name": "教學跟進/回饋", "is_nullable": True, "default": None},
+        ]
+        mock_fetch_columns.side_effect = [existing, expanded]
+
+        connection = _AlteringConnection()
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", return_value=None):
+                prep_excel.main(excel_path, connection=connection, emit_stdout=False)
+        finally:
+            os.remove(excel_path)
+
+        assert (
+            "ALTER TABLE `teach_record_raw` ADD COLUMN `教學跟進/回饋` TEXT NULL",
+            None,
+        ) in connection.commands
 
     def test_staging_file_hash_exists_with_injected_connection(self):
         connection = _SequenceConnection([
