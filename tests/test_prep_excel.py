@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -329,6 +330,55 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(result["教授科目"].tolist(), ["Math", ""])
         self.assertEqual(result["教師"].tolist(), ["Ms. Chan", "Mr. Lee"])
         self.assertEqual(csv_path, captured["path"])
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "get_schema_details")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("pandas.DataFrame.to_csv", return_value=None)
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_suppresses_openpyxl_default_style_warning(
+        self,
+        mock_read_excel,
+        mock_to_csv,
+        mock_get_table_config,
+        mock_get_schema_details,
+        _mock_hash_exists,
+    ):
+        mock_get_table_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(),
+            "options": {},
+        }
+        mock_get_schema_details.return_value = {
+            "order": ["日期"],
+            "required": ["日期"],
+        }
+
+        def emit_warning(*_args, **_kwargs):
+            warnings.warn_explicit(
+                "Workbook contains no default style, apply openpyxl's default",
+                UserWarning,
+                filename="stylesheet.py",
+                lineno=1,
+                module="openpyxl.styles.stylesheet",
+            )
+            return pd.DataFrame({"日期": ["2024-01-01"]})
+
+        mock_read_excel.side_effect = emit_warning
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                prep_excel.main(excel_path)
+        finally:
+            os.remove(excel_path)
+
+        self.assertEqual(caught, [])
+        mock_to_csv.assert_called_once()
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")

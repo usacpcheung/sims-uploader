@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import hashlib
+import warnings
 
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence
@@ -345,7 +346,14 @@ def main(
         file has already been processed (duplicate hash).
     """
 
-    df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+            module="openpyxl.styles.stylesheet",
+        )
+        df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
 
     config = _get_table_config(
         sheet, connection=connection, db_settings=db_settings
