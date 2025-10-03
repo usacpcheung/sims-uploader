@@ -122,23 +122,15 @@ def load_csv_into_staging(
     ordered_columns = schema["order"]
 
     header, has_data_rows = _read_csv_header(csv_path)
-    if header[: len(ordered_columns)] != ordered_columns:
+    if header != ordered_columns:
         raise ValueError(
             "CSV header does not match expected column order"
-            f" for table {table_name}: {header!r} does not begin with {ordered_columns!r}"
+            f" for table {table_name}: {header!r} != {ordered_columns!r}"
         )
     if not has_data_rows:
         raise ValueError("CSV contains no data rows to load")
 
-    column_targets: list[str]
-    if len(header) > len(ordered_columns):
-        extra_count = len(header) - len(ordered_columns)
-        column_targets = [f"`{column}`" for column in ordered_columns]
-        column_targets.extend(f"@unused_{index}" for index in range(extra_count))
-    else:
-        column_targets = [f"`{column}`" for column in ordered_columns]
-
-    column_list = ", ".join(column_targets)
+    column_list = ", ".join(f"`{column}`" for column in ordered_columns)
     load_sql = (
         f"LOAD DATA LOCAL INFILE %s INTO TABLE `{table_name}` "
         "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "

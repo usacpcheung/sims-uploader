@@ -54,6 +54,35 @@ class _FakeConnection:
         self.closed = True
 
 
+class _AlteringCursor:
+    def __init__(self, log):
+        self._log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self._log.append((query, params))
+
+
+class _AlteringConnection:
+    def __init__(self):
+        self.commands: list[tuple[str, object]] = []
+        self.commits = 0
+
+    def cursor(self, *args, **kwargs):
+        return _AlteringCursor(self.commands)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
 class _SequenceConnection:
     def __init__(self, cursor_payloads):
         self._payloads = list(cursor_payloads)
@@ -278,14 +307,16 @@ class PrepExcelSchemaTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(connection.cursors), 2)
 
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
     def test_main_raises_missing_columns_error(
         self,
-        mock_read_excel,
+        _mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
     ):
         mock_get_schema_details.return_value = {
             "order": ["日期", "任教老師"],
@@ -296,7 +327,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
             "metadata_columns": frozenset(),
             "options": {"rename_last_subject": True},
         }
-        mock_read_excel.return_value = pd.DataFrame({"任教老師": ["Ms. Chan"]})
+        _mock_read_excel.return_value = pd.DataFrame({"任教老師": ["Ms. Chan"]})
 
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
             tmp.write(b"dummy")
@@ -310,6 +341,73 @@ class PrepExcelSchemaTests(unittest.TestCase):
             os.remove(excel_path)
 
         self.assertEqual(ctx.exception.missing_columns, ("日期",))
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_adds_missing_staging_columns(
+        self,
+        mock_read_excel,
+        mock_fetch_columns,
+        mock_get_table_config,
+        _mock_hash_exists,
+    ):
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "任教老師": ["Ms. Chan"],
+                "新欄位": ["optional"],
+            }
+        )
+        mock_read_excel.return_value = df
+
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset({"file_hash", "batch_id", "source_year", "ingested_at"}),
+            "options": {},
+        }
+        mock_get_table_config.return_value = config
+
+        existing = [
+            {"name": "日期", "is_nullable": True, "default": None},
+            {"name": "任教老師", "is_nullable": True, "default": None},
+        ]
+        expanded = existing + [
+            {"name": "新欄位", "is_nullable": True, "default": None},
+        ]
+        mock_fetch_columns.side_effect = [existing, expanded]
+
+        captured: dict[str, object] = {}
+
+        def fake_to_csv(self, path, *_args, **_kwargs):
+            captured["columns"] = list(self.columns)
+            captured["path"] = path
+            return None
+
+        connection = _AlteringConnection()
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", new=fake_to_csv):
+                csv_path, _ = prep_excel.main(excel_path, connection=connection, emit_stdout=False)
+        finally:
+            os.remove(excel_path)
+
+        self.assertIn(
+            (
+                "ALTER TABLE `teach_record_raw` ADD COLUMN `新欄位` VARCHAR(255) NULL",
+                None,
+            ),
+            connection.commands,
+        )
+        self.assertGreaterEqual(connection.commits, 1)
+        self.assertEqual(mock_fetch_columns.call_count, 2)
+        self.assertEqual(captured["columns"], ["日期", "任教老師", "新欄位"])
+        self.assertEqual(csv_path, captured["path"])
 
     def test_staging_file_hash_exists_with_injected_connection(self):
         connection = _SequenceConnection([
@@ -328,6 +426,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -336,6 +435,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
@@ -381,6 +481,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(csv_path, captured["path"])
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("pandas.DataFrame.to_csv", return_value=None)
@@ -391,6 +492,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_to_csv,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
@@ -430,6 +532,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_to_csv.assert_called_once()
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -438,6 +541,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
@@ -482,6 +586,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(csv_path, captured["path"])
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -490,6 +595,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         mock_hash_exists,
     ):
         connection = object()
@@ -527,6 +633,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertIsNone(hash_kwargs["db_settings"])
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -535,6 +642,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         _mock_hash_exists,
     ):
         mock_get_table_config.return_value = {
@@ -583,6 +691,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertNotEqual(csv_a, csv_b)
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=True)
+    @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
     @mock.patch.object(prep_excel, "get_schema_details")
     @mock.patch.object(prep_excel, "_get_table_config")
     @mock.patch("app.prep_excel.pd.read_excel")
@@ -591,6 +700,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_read_excel,
         mock_get_table_config,
         mock_get_schema_details,
+        _mock_ensure,
         mock_hash_exists,
     ):
         mock_get_table_config.return_value = {

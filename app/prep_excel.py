@@ -290,6 +290,62 @@ def _fetch_table_columns(
     ]
 
 
+def _quote_identifier(identifier: str) -> str:
+    return f"`{identifier.replace('`', '``')}`"
+
+
+def _ensure_staging_columns(
+    *,
+    headers: Sequence[str],
+    config: Mapping[str, object],
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> bool:
+    table_name = config["table"]
+    metadata_columns = set(config.get("metadata_columns", ()))
+
+    owns_connection = connection is None
+    if owns_connection:
+        settings = _normalise_db_settings(db_settings)
+        connection = pymysql.connect(**settings)
+
+    try:
+        existing_columns = {
+            column["name"]
+            for column in _fetch_table_columns(
+                table_name, connection=connection, db_settings=db_settings
+            )
+        }
+
+        missing_columns: list[str] = []
+        seen: set[str] = set()
+        for header in headers:
+            if header in seen:
+                continue
+            seen.add(header)
+            if not header:
+                continue
+            if header in metadata_columns:
+                continue
+            if header in existing_columns:
+                continue
+            missing_columns.append(header)
+
+        if not missing_columns:
+            return False
+
+        with connection.cursor() as cursor:
+            for column in missing_columns:
+                cursor.execute(
+                    f"ALTER TABLE {_quote_identifier(table_name)} ADD COLUMN {_quote_identifier(column)} VARCHAR(255) NULL"
+                )
+        connection.commit()
+        return True
+    finally:
+        if owns_connection and connection is not None:
+            connection.close()
+
+
 def get_schema_details(
     sheet: str = DEFAULT_SHEET,
     *,
@@ -413,6 +469,15 @@ def main(
     options = config.get("options") or {}
     rename_last_subject = bool(options.get("rename_last_subject"))
     df = normalize_headers_and_subject(df, rename_last_subject=rename_last_subject)
+
+    schema_changed = _ensure_staging_columns(
+        headers=list(df.columns),
+        config=config,
+        connection=connection,
+        db_settings=db_settings,
+    )
+    if schema_changed:
+        _get_sheet_config.cache_clear()
 
     schema = get_schema_details(
         sheet, connection=connection, db_settings=db_settings
