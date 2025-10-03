@@ -139,12 +139,16 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
         column_mappings = _loads_json(row.get("column_mappings"))
+        normalized_table = row.get("normalized_table")
+        if normalized_table is None and isinstance(options, Mapping):
+            normalized_table = options.get("normalized_table")
         config[row["sheet_name"]] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
             "required_columns": frozenset(required_columns),
             "options": options,
             "column_mappings": column_mappings,
+            "normalized_table": normalized_table,
         }
     return config
 

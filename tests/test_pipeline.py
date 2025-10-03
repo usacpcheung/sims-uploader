@@ -243,25 +243,6 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
     monkeypatch.setattr(pipeline.pymysql, "connect", fake_connect)
     monkeypatch.setattr(pipeline.prep_excel.pymysql, "connect", fake_connect)
     pipeline.prep_excel._get_sheet_config.cache_clear()
-    original_get_table_config = pipeline.prep_excel._get_table_config
-
-    def get_table_config_with_normalized(
-        sheet, *, connection=None, db_settings=None
-    ):
-        config = original_get_table_config(
-            sheet, connection=connection, db_settings=db_settings
-        )
-        enriched = dict(config)
-        options = enriched.get("options") or {}
-        enriched.setdefault(
-            "normalized_table", options.get("normalized_table", "teach_record_normalized")
-        )
-        return enriched
-
-    monkeypatch.setattr(
-        pipeline.prep_excel, "_get_table_config", get_table_config_with_normalized
-    )
-
     inserted = {}
 
     def fake_insert(connection_obj, table, rows, column_mappings):
@@ -288,7 +269,9 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
     assert "column_mappings" in config_connection.cursor_obj.queries[0]
     assert "column_mappings" not in config_connection.cursor_obj.queries[1]
     assert inserted["column_mappings"] is None
+    assert inserted["table"] == "teach_record_normalized"
     assert result.normalized_rows == len(staged_rows)
+    assert result.normalized_table == "teach_record_normalized"
     assert connection.committed
     pipeline.prep_excel._get_sheet_config.cache_clear()
 

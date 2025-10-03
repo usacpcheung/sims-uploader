@@ -89,7 +89,10 @@ VALUES (
         '備註', '備註',
         '教學跟進/回饋', '教學跟進/回饋'
     ),
-    JSON_OBJECT('rename_last_subject', true)
+    JSON_OBJECT(
+        'rename_last_subject', true,
+        'normalized_table', 'teach_record_normalized'
+    )
 )
 ON DUPLICATE KEY UPDATE
     staging_table = VALUES(staging_table),
