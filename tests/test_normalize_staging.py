@@ -170,7 +170,7 @@ def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):
     assert cursor.execute_calls == [
         (
             "UPDATE `teach_record_raw` SET processed_at = %s "
-            "WHERE file_hash = %s AND processed_at IS NULL",
+            "WHERE file_hash = %s AND (processed_at IS NULL OR processed_at = '0000-00-00 00:00:00')",
             (processed_at, "hash-123"),
         )
     ]

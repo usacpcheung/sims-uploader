@@ -159,6 +159,114 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert connection.closed
 
 
+def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-zero"
+    staged_rows = [
+        {
+            "id": 1,
+            "file_hash": file_hash,
+            "batch_id": "batch-zero",
+            "source_year": "2024",
+            "processed_at": "0000-00-00 00:00:00",
+        },
+        {
+            "id": 2,
+            "file_hash": file_hash,
+            "batch_id": "batch-zero",
+            "source_year": "2024",
+            "processed_at": "0000-00-00 00:00:00",
+        },
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-zero",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 8, 1, 8, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "main",
+        lambda *args, **kwargs: (csv_path, file_hash),
+    )
+    monkeypatch.setattr(
+        pipeline.ingest_excel,
+        "load_csv_into_staging",
+        lambda *args, **kwargs: staging_result,
+    )
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "_get_table_config",
+        lambda sheet, db_settings=None: {
+            "table": "teach_record_raw",
+            "normalized_table": "teach_record_normalized",
+            "column_mappings": {"姓名": "姓名"},
+        },
+    )
+
+    class _ZeroDateCursor(_Cursor):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if sql.strip().upper().startswith("SELECT"):
+                assert (
+                    "processed_at IS NULL OR processed_at = '0000-00-00 00:00:00'"
+                    in sql
+                )
+
+    class _ZeroDateConnection(_Connection):
+        def cursor(self, cursor_class=None):
+            self.cursor_calls.append(cursor_class)
+            return _ZeroDateCursor(self._rows)
+
+    connection = _ZeroDateConnection(staged_rows)
+    monkeypatch.setattr(pipeline.pymysql, "connect", lambda **kwargs: connection)
+
+    inserted = {}
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "insert_normalized_rows",
+        lambda conn, table, rows, column_mappings: inserted.update(
+            {
+                "table": table,
+                "rows": rows,
+                "column_mappings": column_mappings,
+            }
+        )
+        or len(rows),
+    )
+
+    marked = {}
+
+    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+        marked.update(
+            {
+                "table": table,
+                "row_ids": tuple(row_ids),
+                "file_hash": file_hash,
+            }
+        )
+        return dt.datetime(2024, 8, 1, 9, tzinfo=dt.timezone.utc)
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "mark_staging_rows_processed",
+        fake_mark,
+    )
+
+    result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
+
+    assert inserted["rows"] == staged_rows
+    assert result.normalized_rows == len(staged_rows)
+    assert marked["row_ids"] == (1, 2)
+    assert marked["file_hash"] == file_hash
+    assert marked["table"] == "teach_record_raw"
+    assert not connection.rolled_back
+    assert connection.committed
+
+
 @pytest.mark.parametrize(
     "error_cls",
     [pymysql.err.ProgrammingError, pymysql.err.InternalError],

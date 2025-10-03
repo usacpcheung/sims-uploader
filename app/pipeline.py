@@ -55,7 +55,10 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 def _fetch_staging_rows(connection, table: str, file_hash: str):
     with connection.cursor(pymysql.cursors.DictCursor) as cursor:
         cursor.execute(
-            f"SELECT * FROM `{table}` WHERE file_hash = %s AND processed_at IS NULL",
+            (
+                "SELECT * FROM `{table}` WHERE file_hash = %s "
+                "AND (processed_at IS NULL OR processed_at = '0000-00-00 00:00:00')"
+            ).format(table=table),
             (file_hash,),
         )
         return cursor.fetchall()
