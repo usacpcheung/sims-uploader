@@ -118,13 +118,20 @@ def run_pipeline(
     settings = ingest_excel._get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
     try:
-        connection.begin()
         staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
+        resolved_mappings = normalize_staging.resolve_column_mappings(
+            staging_rows, column_mappings
+        )
+        normalize_staging.ensure_normalized_schema(
+            connection, normalized_table, resolved_mappings
+        )
+
+        connection.begin()
         normalized_rows = normalize_staging.insert_normalized_rows(
             connection,
             normalized_table,
             staging_rows,
-            column_mappings,
+            resolved_mappings,
         )
         processed_at = normalize_staging.mark_staging_rows_processed(
             connection,

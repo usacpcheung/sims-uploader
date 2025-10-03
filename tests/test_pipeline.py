@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import datetime as dt
 from types import SimpleNamespace
 
@@ -122,6 +123,11 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
         "insert_normalized_rows",
         fake_insert,
     )
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "ensure_normalized_schema",
+        lambda *args, **kwargs: None,
+    )
 
     def fake_mark(connection_obj, table, row_ids, *, file_hash):
         captured.mark_call = {
@@ -236,6 +242,11 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
             }
         )
         or len(rows),
+    )
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "ensure_normalized_schema",
+        lambda *args, **kwargs: None,
     )
 
     marked = {}
@@ -364,11 +375,16 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
         "insert_normalized_rows",
         fake_insert,
     )
-
+    
     monkeypatch.setattr(
         pipeline.normalize_staging,
         "mark_staging_rows_processed",
         lambda *args, **kwargs: dt.datetime(2024, 6, 1, 13, tzinfo=dt.timezone.utc),
+    )
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "ensure_normalized_schema",
+        lambda *args, **kwargs: None,
     )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
@@ -376,7 +392,7 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
     assert len(config_connection.cursor_obj.queries) == 2
     assert "column_mappings" in config_connection.cursor_obj.queries[0]
     assert "column_mappings" not in config_connection.cursor_obj.queries[1]
-    assert inserted["column_mappings"] is None
+    assert inserted["column_mappings"] == OrderedDict()
     assert inserted["table"] == "teach_record_normalized"
     assert result.normalized_rows == len(staged_rows)
     assert result.normalized_table == "teach_record_normalized"
@@ -452,6 +468,11 @@ def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
         "mark_staging_rows_processed",
         lambda *args, **kwargs: dt.datetime(2024, 7, 1, 9, tzinfo=dt.timezone.utc),
     )
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "ensure_normalized_schema",
+        lambda *args, **kwargs: None,
+    )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
@@ -462,6 +483,95 @@ def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
     assert connection.committed
     assert config_connection.closed
     pipeline.prep_excel._get_sheet_config.cache_clear()
+
+
+def test_run_pipeline_expands_normalized_schema(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-extra"
+    staged_rows = [
+        {
+            "id": 1,
+            "file_hash": file_hash,
+            "batch_id": "batch-extra",
+            "source_year": "2024",
+            "ingested_at": "2024-09-01T00:00:00",
+            "姓名": "Student",
+            "新欄位": "value",
+        }
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-extra",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 9, 1, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "main",
+        lambda *args, **kwargs: (csv_path, file_hash),
+    )
+    monkeypatch.setattr(
+        pipeline.ingest_excel,
+        "load_csv_into_staging",
+        lambda *args, **kwargs: staging_result,
+    )
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "_get_table_config",
+        lambda sheet, db_settings=None: {
+            "table": "teach_record_raw",
+            "normalized_table": "teach_record_normalized",
+            "column_mappings": None,
+        },
+    )
+
+    connection = _Connection(staged_rows)
+    monkeypatch.setattr(pipeline.pymysql, "connect", lambda **kwargs: connection)
+
+    ensured = {}
+
+    def fake_ensure(conn, table, mappings):
+        ensured["table"] = table
+        ensured["columns"] = tuple(mappings.keys())
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "ensure_normalized_schema",
+        fake_ensure,
+    )
+
+    inserted = {}
+
+    def fake_insert(connection_obj, table, rows, column_mappings):
+        inserted["table"] = table
+        inserted["rows"] = rows
+        inserted["column_mappings"] = column_mappings
+        return len(rows)
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "insert_normalized_rows",
+        fake_insert,
+    )
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "mark_staging_rows_processed",
+        lambda *args, **kwargs: dt.datetime(2024, 9, 1, 1, tzinfo=dt.timezone.utc),
+    )
+
+    result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
+
+    assert ensured["table"] == "teach_record_normalized"
+    assert "新欄位" in ensured["columns"]
+    assert inserted["table"] == "teach_record_normalized"
+    assert inserted["column_mappings"]["新欄位"] == "新欄位"
+    assert inserted["rows"][0]["新欄位"] == "value"
+    assert result.normalized_rows == 1
+    assert connection.committed
 
 
 def test_cli_invokes_pipeline(monkeypatch, capsys):

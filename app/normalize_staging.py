@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+from collections import OrderedDict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Iterable, Mapping, Sequence
@@ -10,38 +11,15 @@ from typing import Callable, Iterable, Mapping, Sequence
 # Metadata fields that should always be preserved for downstream joins.
 _METADATA_COLUMNS = ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"]
 
-# Ordered list of business columns mirrored from the teaching-record spreadsheet.
-BUSINESS_COLUMNS: Sequence[str] = (
-    "記錄狀態",
-    "日期",
-    "任教老師",
-    "學生編號",
-    "姓名",
-    "英文姓名",
-    "性別",
-    "學生級別",
-    "病房",
-    "病床",
-    "出勤 (來自出勤記錄輸入)",
-    "出勤",
-    "教學組別",
-    "科目",
-    "取代科目",
-    "教授科目",
-    "課程級別",
-    "教材",
-    "課題",
-    "教學重點1",
-    "教學重點2",
-    "教學重點3",
-    "教學重點4",
-    "自定課題",
-    "自定教學重點",
-    "練習",
-    "上課時數",
-    "備註",
-    "教學跟進/回饋",
-)
+# Source-side columns that should never be copied directly into the normalized
+# payload because they are handled separately (or represent bookkeeping data).
+_RESERVED_SOURCE_COLUMNS = {"id", "processed_at"}
+
+# Certain columns require stronger typing than the default VARCHAR fallback.
+_COLUMN_TYPE_OVERRIDES = {
+    "日期": "DATE NULL",
+    "上課時數": "DECIMAL(6,2) NULL",
+}
 
 
 @dataclass(frozen=True)
@@ -152,11 +130,41 @@ def _normalise_metadata(column: str, row: Mapping[str, object]):
     return row.get(column)
 
 
+def resolve_column_mappings(
+    rows: Sequence[Mapping[str, object]],
+    column_mappings: Mapping[str, str] | None,
+) -> "OrderedDict[str, str]":
+    """Expand configured mappings with any new staging columns."""
+
+    resolved: "OrderedDict[str, str]" = OrderedDict()
+    if column_mappings:
+        for normalized_column, source_column in column_mappings.items():
+            resolved[normalized_column] = source_column
+
+    if rows:
+        staging_columns = list(rows[0].keys())
+        for column in staging_columns:
+            if column in _RESERVED_SOURCE_COLUMNS:
+                continue
+            if column in _METADATA_COLUMNS:
+                continue
+            if column in resolved:
+                continue
+            if column in resolved.values():
+                # Avoid mapping the same source column twice when explicit
+                # configuration already redirected it.
+                continue
+            resolved[column] = column
+
+    return resolved
+
+
 def _build_ordered_columns(column_mappings: Mapping[str, str]) -> list[str]:
     ordered = list(_METADATA_COLUMNS)
-    for column in BUSINESS_COLUMNS:
-        if column in column_mappings:
-            ordered.append(column)
+    for column in column_mappings:
+        if column in ordered:
+            continue
+        ordered.append(column)
     return ordered
 
 
@@ -173,7 +181,9 @@ def _build_row(row: Mapping[str, object], column_mappings: Mapping[str, str]) ->
     return tuple(values)
 
 
-def build_insert_statement(table: str, column_mappings: Mapping[str, str]) -> tuple[str, list[str]]:
+def build_insert_statement(
+    table: str, column_mappings: Mapping[str, str]
+) -> tuple[str, list[str]]:
     ordered_columns = _build_ordered_columns(column_mappings)
     column_sql = ", ".join(f"`{name}`" for name in ordered_columns)
     placeholders = ", ".join(["%s"] * len(ordered_columns))
@@ -191,6 +201,48 @@ def prepare_rows(
     return prepared
 
 
+def _quote_identifier(identifier: str) -> str:
+    return f"`{identifier.replace('`', '``')}`"
+
+
+def _fetch_existing_columns(connection, table: str) -> list[str]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SHOW COLUMNS FROM {_quote_identifier(table)}")
+        return [row[0] for row in cursor.fetchall()]
+
+
+def ensure_normalized_schema(
+    connection,
+    table: str,
+    column_mappings: Mapping[str, str],
+) -> bool:
+    """Ensure the normalized table contains columns for every mapping key."""
+
+    if not column_mappings:
+        return False
+
+    existing_columns = set(_fetch_existing_columns(connection, table))
+    additions: list[tuple[str, str]] = []
+    for column in column_mappings:
+        if column in _METADATA_COLUMNS:
+            continue
+        if column in existing_columns:
+            continue
+        column_type = _COLUMN_TYPE_OVERRIDES.get(column, "VARCHAR(255) NULL")
+        additions.append((column, column_type))
+
+    if not additions:
+        return False
+
+    with connection.cursor() as cursor:
+        for column, column_type in additions:
+            cursor.execute(
+                f"ALTER TABLE {_quote_identifier(table)} "
+                f"ADD COLUMN {_quote_identifier(column)} {column_type}"
+            )
+    return True
+
+
 def insert_normalized_rows(
     connection,
     table: str,
@@ -199,10 +251,9 @@ def insert_normalized_rows(
 ) -> int:
     if not rows:
         return 0
-    if column_mappings is None:
-        column_mappings = {column: column for column in BUSINESS_COLUMNS}
-    sql, _ = build_insert_statement(table, column_mappings)
-    prepared = prepare_rows(rows, column_mappings)
+    resolved_mappings = resolve_column_mappings(rows, column_mappings)
+    sql, _ = build_insert_statement(table, resolved_mappings)
+    prepared = prepare_rows(rows, resolved_mappings)
     with connection.cursor() as cursor:
         cursor.executemany(sql, prepared)
         if getattr(cursor, "rowcount", None) not in (None, -1):
@@ -247,7 +298,8 @@ def mark_staging_rows_processed(
 
 
 __all__ = [
-    "BUSINESS_COLUMNS",
+    "ensure_normalized_schema",
+    "resolve_column_mappings",
     "TableConfig",
     "build_insert_statement",
     "insert_normalized_rows",

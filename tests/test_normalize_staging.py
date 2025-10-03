@@ -79,8 +79,8 @@ def sample_row():
 
 
 @pytest.fixture
-def column_mappings():
-    return {column: column for column in normalize_staging.BUSINESS_COLUMNS}
+def column_mappings(sample_row):
+    return normalize_staging.resolve_column_mappings([sample_row], None)
 
 
 def test_build_insert_statement_uses_chinese_headers(column_mappings):
@@ -144,6 +144,43 @@ def test_insert_normalized_rows_uses_identity_columns(sample_row, column_mapping
     assert row_values[1] == sample_row["file_hash"]
     assert row_values[ordered_columns.index("日期")] == dt.date(2024, 5, 1)
     assert row_values[ordered_columns.index("上課時數")] == Decimal("1.5")
+
+
+def test_resolve_column_mappings_adds_new_columns():
+    rows = [
+        {
+            "id": 1,
+            "file_hash": "hash",
+            "batch_id": "batch",
+            "source_year": "2024",
+            "ingested_at": "2024-01-01T00:00:00",
+            "姓名": "Student",
+            "新欄位": "value",
+        }
+    ]
+    resolved = normalize_staging.resolve_column_mappings(rows, {"姓名": "姓名"})
+    assert list(resolved.keys())[-1] == "新欄位"
+    assert resolved["新欄位"] == "新欄位"
+
+
+def test_ensure_normalized_schema_alters_missing_columns(monkeypatch, column_mappings):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    monkeypatch.setattr(
+        normalize_staging,
+        "_fetch_existing_columns",
+        lambda conn, table: ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"],
+    )
+
+    changed = normalize_staging.ensure_normalized_schema(
+        connection, "teach_record_normalized", column_mappings
+    )
+
+    assert changed is True
+    assert cursor.execute_calls
+    alter_statements = [sql for sql, _ in cursor.execute_calls if sql.startswith("ALTER TABLE")]
+    assert alter_statements
 
 
 def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):
