@@ -4,6 +4,7 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pymysql
+import pytest
 
 from app import ingest_excel, pipeline
 
@@ -158,7 +159,13 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert connection.closed
 
 
-def test_run_pipeline_falls_back_when_config_lacks_column_mappings(monkeypatch):
+@pytest.mark.parametrize(
+    "error_cls",
+    [pymysql.err.ProgrammingError, pymysql.err.InternalError],
+)
+def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
+    monkeypatch, error_cls
+):
     csv_path = "/tmp/fake.csv"
     file_hash = "hash-abc"
     staged_rows = [
@@ -200,9 +207,7 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(monkeypatch):
             self.queries.append(sql)
             if self._raise_missing and "column_mappings" in sql:
                 self._raise_missing = False
-                raise pymysql.err.ProgrammingError(
-                    1054, "Unknown column 'column_mappings' in 'SELECT'"
-                )
+                raise error_cls(1054, "Unknown column 'column_mappings' in 'SELECT'")
 
         def fetchall(self):
             return self.rows

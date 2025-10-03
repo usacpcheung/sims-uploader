@@ -163,7 +163,7 @@ def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
                   FROM {CONFIG_TABLE}
                 """
             )
-        except pymysql.err.ProgrammingError as exc:
+        except pymysql.err.MySQLError as exc:
             error_code = exc.args[0] if exc.args else None
             if error_code != 1054:
                 raise
