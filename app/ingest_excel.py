@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -25,6 +26,18 @@ from app.config import get_db_settings
 from app import prep_excel
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StagingLoadResult:
+    """Metadata describing a successful staging-table load."""
+
+    staging_table: str
+    file_hash: str
+    batch_id: str
+    source_year: str
+    ingested_at: datetime
+    rowcount: int
 
 
 def _extract_scalar(result: object) -> object | None:
@@ -88,27 +101,16 @@ def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str,
     return settings
 
 
-def main(
-    workbook_path: str,
-    sheet: str = prep_excel.DEFAULT_SHEET,
+def load_csv_into_staging(
+    csv_path: str,
     *,
+    sheet: str,
     source_year: str,
+    file_hash: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
-) -> None:
-    if not source_year or str(source_year).strip() == "":
-        raise ValueError("source_year is required")
-
-    csv_path, file_hash = prep_excel.main(
-        workbook_path,
-        sheet,
-        emit_stdout=False,
-        db_settings=db_settings,
-    )
-
-    if csv_path is None:
-        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
-        return
+) -> StagingLoadResult:
+    """Load a prepared CSV file into the staging table and return metadata."""
 
     config = prep_excel._get_table_config(
         sheet, db_settings=db_settings
@@ -203,17 +205,58 @@ def main(
     except Exception:
         connection.rollback()
         raise
-    else:
-        LOGGER.info(
-            "Loaded %s rows into %s (hash=%s, source_year=%s, batch_id=%s)",
-            rowcount,
-            table_name,
-            file_hash,
-            source_year,
-            batch_id,
-        )
     finally:
         connection.close()
+
+    return StagingLoadResult(
+        staging_table=table_name,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        source_year=str(source_year),
+        ingested_at=ingested_at,
+        rowcount=rowcount,
+    )
+
+
+def main(
+    workbook_path: str,
+    sheet: str = prep_excel.DEFAULT_SHEET,
+    *,
+    source_year: str,
+    batch_id: str | None = None,
+    db_settings: Mapping[str, object] | None = None,
+) -> None:
+    if not source_year or str(source_year).strip() == "":
+        raise ValueError("source_year is required")
+
+    csv_path, file_hash = prep_excel.main(
+        workbook_path,
+        sheet,
+        emit_stdout=False,
+        db_settings=db_settings,
+    )
+
+    if csv_path is None:
+        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
+        return
+
+    result = load_csv_into_staging(
+        csv_path,
+        sheet=sheet,
+        source_year=source_year,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        db_settings=db_settings,
+    )
+
+    LOGGER.info(
+        "Loaded %s rows into %s (hash=%s, source_year=%s, batch_id=%s)",
+        result.rowcount,
+        result.staging_table,
+        result.file_hash,
+        result.source_year,
+        result.batch_id,
+    )
 
 
 def cli(argv: Iterable[str] | None = None) -> None:
