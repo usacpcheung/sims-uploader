@@ -276,6 +276,86 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
     pipeline.prep_excel._get_sheet_config.cache_clear()
 
 
+def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-derived"
+    staged_rows = [
+        {"id": 100, "file_hash": file_hash},
+        {"id": 101, "file_hash": file_hash},
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-derived",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 7, 1, 8, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "main",
+        lambda *args, **kwargs: (csv_path, file_hash),
+    )
+    monkeypatch.setattr(
+        pipeline.ingest_excel,
+        "load_csv_into_staging",
+        lambda *args, **kwargs: staging_result,
+    )
+
+    config_rows = [
+        {
+            "sheet_name": "TEACH_RECORD",
+            "staging_table": "teach_record_raw",
+            "metadata_columns": ["file_hash"],
+            "required_columns": [],
+            "options": {},
+            "column_mappings": None,
+        }
+    ]
+    config_connection = _Connection(config_rows)
+    connection = _Connection(staged_rows)
+    pipeline.prep_excel._get_sheet_config.cache_clear()
+
+    def fake_connect(**kwargs):
+        if kwargs.get("local_infile"):
+            return connection
+        return config_connection
+
+    monkeypatch.setattr(pipeline.pymysql, "connect", fake_connect)
+    monkeypatch.setattr(pipeline.prep_excel.pymysql, "connect", fake_connect)
+
+    inserted = {}
+
+    def fake_insert(connection_obj, table, rows, column_mappings):
+        inserted["table"] = table
+        inserted["rows"] = rows
+        inserted["column_mappings"] = column_mappings
+        return len(rows)
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "insert_normalized_rows",
+        fake_insert,
+    )
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "mark_staging_rows_processed",
+        lambda *args, **kwargs: dt.datetime(2024, 7, 1, 9, tzinfo=dt.timezone.utc),
+    )
+
+    result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
+
+    assert inserted["table"] == "teach_record_normalized"
+    assert result.normalized_table == "teach_record_normalized"
+    assert result.staging_table == "teach_record_raw"
+    assert result.normalized_rows == len(staged_rows)
+    assert connection.committed
+    assert config_connection.closed
+    pipeline.prep_excel._get_sheet_config.cache_clear()
+
+
 def test_cli_invokes_pipeline(monkeypatch, capsys):
     result = pipeline.PipelineResult(
         file_hash="hash-xyz",

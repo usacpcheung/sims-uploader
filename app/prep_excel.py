@@ -134,24 +134,42 @@ def _freeze_db_settings(settings: Mapping[str, object]) -> tuple[tuple[str, obje
 
 def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
     config: dict[str, dict[str, object]] = {}
+    normalized_sources: dict[str, str] = {}
     for row in rows:
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
         column_mappings = _loads_json(row.get("column_mappings"))
+        normalized_table_source = "none"
         normalized_table = row.get("normalized_table")
+        if isinstance(normalized_table, str):
+            normalized_table = normalized_table.strip() or None
+        if normalized_table is not None:
+            normalized_table_source = "explicit"
         if normalized_table is None and isinstance(options, Mapping):
-            normalized_table = options.get("normalized_table")
+            option_value = options.get("normalized_table")
+            if isinstance(option_value, str):
+                option_value = option_value.strip() or None
+            if option_value is not None:
+                normalized_table = option_value
+                normalized_table_source = "explicit"
+        if normalized_table is None:
+            staging_table = row.get("staging_table")
+            if isinstance(staging_table, str):
+                base_table = staging_table.strip()
+                if base_table:
+                    if base_table.endswith("_raw"):
+                        base_table = base_table[: -len("_raw")]
+                    normalized_table = f"{base_table}_normalized"
+                    normalized_table_source = "derived"
         sheet_name = row["sheet_name"]
         existing = config.get(sheet_name)
-        if (
-            existing is not None
-            and existing.get("normalized_table") is not None
-            and normalized_table is None
-        ):
-            # Preserve workbook-specific configuration that already defines the
-            # normalization target when a more generic row lacks it.
-            continue
+        if existing is not None:
+            existing_source = normalized_sources.get(sheet_name, "none")
+            if existing_source == "explicit" and normalized_table_source != "explicit":
+                # Preserve workbook-specific configuration that already defines the
+                # normalization target when a more generic row lacks it.
+                continue
         config[sheet_name] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
@@ -160,6 +178,7 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
             "column_mappings": column_mappings,
             "normalized_table": normalized_table,
         }
+        normalized_sources[sheet_name] = normalized_table_source
     return config
 
 
