@@ -100,7 +100,14 @@ class PrepExcelSchemaTests(unittest.TestCase):
                 "sheet_name": prep_excel.DEFAULT_SHEET,
                 "staging_table": "teach_record_raw",
                 "metadata_columns": json.dumps(
-                    ["id", "file_hash", "batch_id", "source_year", "ingested_at"]
+                    [
+                        "id",
+                        "file_hash",
+                        "batch_id",
+                        "source_year",
+                        "ingested_at",
+                        "processed_at",
+                    ]
                 ),
                 "required_columns": json.dumps([]),
                 "options": None,
@@ -161,7 +168,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
             {
                 "sheet_name": prep_excel.DEFAULT_SHEET,
                 "staging_table": "teach_record_raw",
-                "metadata_columns": json.dumps(["id", "file_hash"]),
+                "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
                 "required_columns": json.dumps(["日期"]),
                 "options": None,
             }
@@ -195,14 +202,14 @@ class PrepExcelSchemaTests(unittest.TestCase):
         generic_row = {
             "sheet_name": prep_excel.DEFAULT_SHEET,
             "staging_table": "teach_record_raw",
-            "metadata_columns": json.dumps(["id", "file_hash"]),
+            "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
             "required_columns": json.dumps([]),
             "options": json.dumps({}),
         }
         specific_row = {
             "sheet_name": prep_excel.DEFAULT_SHEET,
             "staging_table": "teach_record_raw",
-            "metadata_columns": json.dumps(["id", "file_hash"]),
+            "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
             "required_columns": json.dumps([]),
             "options": json.dumps({"normalized_table": "teach_record_normalized"}),
         }
@@ -219,7 +226,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
         row = {
             "sheet_name": prep_excel.DEFAULT_SHEET,
             "staging_table": "teach_record_raw",
-            "metadata_columns": json.dumps(["id", "file_hash"]),
+            "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
             "required_columns": json.dumps([]),
             "options": json.dumps({}),
             "column_mappings": None,
@@ -238,7 +245,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
             {
                 "sheet_name": prep_excel.DEFAULT_SHEET,
                 "staging_table": "teach_record_raw",
-                "metadata_columns": json.dumps(["id", "file_hash"]),
+                "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
                 "required_columns": json.dumps([]),
                 "options": None,
             }

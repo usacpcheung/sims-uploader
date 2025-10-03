@@ -227,7 +227,7 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
         {
             "sheet_name": "TEACH_RECORD",
             "staging_table": "teach_record_raw",
-            "metadata_columns": ["file_hash"],
+            "metadata_columns": ["file_hash", "processed_at"],
             "required_columns": [],
             "options": {"normalized_table": "teach_record_normalized"},
         }
@@ -307,7 +307,7 @@ def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
         {
             "sheet_name": "TEACH_RECORD",
             "staging_table": "teach_record_raw",
-            "metadata_columns": ["file_hash"],
+            "metadata_columns": ["file_hash", "processed_at"],
             "required_columns": [],
             "options": {},
             "column_mappings": None,
