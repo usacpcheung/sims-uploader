@@ -138,7 +138,7 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
-        column_mappings = _loads_json(row.get("column_mappings")) or {}
+        column_mappings = _loads_json(row.get("column_mappings"))
         config[row["sheet_name"]] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
@@ -151,18 +151,37 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
 
 def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
     with connection.cursor(pymysql.cursors.DictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT sheet_name,
-                   staging_table,
-                   metadata_columns,
-                   required_columns,
-                   column_mappings,
-                   options
-              FROM {CONFIG_TABLE}
-            """
-        )
-        rows = cur.fetchall()
+        try:
+            cur.execute(
+                f"""
+                SELECT sheet_name,
+                       staging_table,
+                       metadata_columns,
+                       required_columns,
+                       column_mappings,
+                       options
+                  FROM {CONFIG_TABLE}
+                """
+            )
+        except pymysql.err.ProgrammingError as exc:
+            error_code = exc.args[0] if exc.args else None
+            if error_code != 1054:
+                raise
+            cur.execute(
+                f"""
+                SELECT sheet_name,
+                       staging_table,
+                       metadata_columns,
+                       required_columns,
+                       options
+                  FROM {CONFIG_TABLE}
+                """
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                row.setdefault("column_mappings", None)
+        else:
+            rows = cur.fetchall()
     return _parse_sheet_config_rows(rows)
 
 

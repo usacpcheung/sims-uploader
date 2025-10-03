@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 from types import SimpleNamespace
 
+import pymysql
+
 from app import ingest_excel, pipeline
 
 
@@ -154,6 +156,136 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert connection.committed
     assert not connection.rolled_back
     assert connection.closed
+
+
+def test_run_pipeline_falls_back_when_config_lacks_column_mappings(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-abc"
+    staged_rows = [
+        {"id": 10, "file_hash": file_hash},
+        {"id": 11, "file_hash": file_hash},
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-xyz",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 6, 1, 12, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    def fake_prep_main(*args, **kwargs):
+        return csv_path, file_hash
+
+    monkeypatch.setattr(pipeline.prep_excel, "main", fake_prep_main)
+    monkeypatch.setattr(
+        pipeline.ingest_excel,
+        "load_csv_into_staging",
+        lambda *args, **kwargs: staging_result,
+    )
+
+    class ConfigCursor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.queries = []
+            self._raise_missing = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            self.queries.append(sql)
+            if self._raise_missing and "column_mappings" in sql:
+                self._raise_missing = False
+                raise pymysql.err.ProgrammingError(
+                    1054, "Unknown column 'column_mappings' in 'SELECT'"
+                )
+
+        def fetchall(self):
+            return self.rows
+
+    class ConfigConnection:
+        def __init__(self, rows):
+            self.cursor_obj = ConfigCursor(rows)
+            self.closed = False
+
+        def cursor(self, cursor_class=None):
+            return self.cursor_obj
+
+        def close(self):
+            self.closed = True
+
+    config_rows = [
+        {
+            "sheet_name": "TEACH_RECORD",
+            "staging_table": "teach_record_raw",
+            "metadata_columns": ["file_hash"],
+            "required_columns": [],
+            "options": {"normalized_table": "teach_record_normalized"},
+        }
+    ]
+    config_connection = ConfigConnection(config_rows)
+    connection = _Connection(staged_rows)
+
+    def fake_connect(**kwargs):
+        if kwargs.get("local_infile"):
+            return connection
+        return config_connection
+
+    monkeypatch.setattr(pipeline.pymysql, "connect", fake_connect)
+    monkeypatch.setattr(pipeline.prep_excel.pymysql, "connect", fake_connect)
+    pipeline.prep_excel._get_sheet_config.cache_clear()
+    original_get_table_config = pipeline.prep_excel._get_table_config
+
+    def get_table_config_with_normalized(
+        sheet, *, connection=None, db_settings=None
+    ):
+        config = original_get_table_config(
+            sheet, connection=connection, db_settings=db_settings
+        )
+        enriched = dict(config)
+        options = enriched.get("options") or {}
+        enriched.setdefault(
+            "normalized_table", options.get("normalized_table", "teach_record_normalized")
+        )
+        return enriched
+
+    monkeypatch.setattr(
+        pipeline.prep_excel, "_get_table_config", get_table_config_with_normalized
+    )
+
+    inserted = {}
+
+    def fake_insert(connection_obj, table, rows, column_mappings):
+        inserted["table"] = table
+        inserted["rows"] = rows
+        inserted["column_mappings"] = column_mappings
+        return len(rows)
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "insert_normalized_rows",
+        fake_insert,
+    )
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "mark_staging_rows_processed",
+        lambda *args, **kwargs: dt.datetime(2024, 6, 1, 13, tzinfo=dt.timezone.utc),
+    )
+
+    result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
+
+    assert len(config_connection.cursor_obj.queries) == 2
+    assert "column_mappings" in config_connection.cursor_obj.queries[0]
+    assert "column_mappings" not in config_connection.cursor_obj.queries[1]
+    assert inserted["column_mappings"] is None
+    assert result.normalized_rows == len(staged_rows)
+    assert connection.committed
+    pipeline.prep_excel._get_sheet_config.cache_clear()
 
 
 def test_cli_invokes_pipeline(monkeypatch, capsys):

@@ -108,7 +108,9 @@ def run_pipeline(
         raise ValueError(
             f"Sheet {sheet!r} is missing a normalized_table configuration"
         )
-    column_mappings = table_config.get("column_mappings") or {}
+    column_mappings = table_config.get("column_mappings")
+    if not column_mappings:
+        column_mappings = None
 
     settings = ingest_excel._get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
