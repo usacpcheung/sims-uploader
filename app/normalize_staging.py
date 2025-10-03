@@ -205,10 +205,34 @@ def _quote_identifier(identifier: str) -> str:
     return f"`{identifier.replace('`', '``')}`"
 
 
-def _fetch_existing_columns(connection, table: str) -> list[str]:
+def _normalise_sql_type(type_text: str, *, default_nullability: str | None = None) -> str:
+    text = " ".join(str(type_text).strip().upper().split())
+    if not text:
+        return text
+    if default_nullability:
+        has_nullability = " NULL" in text or " NOT NULL" in text
+        if not has_nullability:
+            text = f"{text} {default_nullability}"
+    return text
+
+
+def _fetch_existing_columns(connection, table: str) -> list[dict[str, object]]:
     with connection.cursor() as cursor:
         cursor.execute(f"SHOW COLUMNS FROM {_quote_identifier(table)}")
-        return [row[0] for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+
+    columns: list[dict[str, object]] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            name = row.get("Field")
+            col_type = row.get("Type")
+            nullable = str(row.get("Null", "")).upper() == "YES"
+        else:
+            name = row[0]
+            col_type = row[1]
+            nullable = str(row[2]).upper() == "YES"
+        columns.append({"name": name, "type": col_type, "is_nullable": nullable})
+    return columns
 
 
 def ensure_normalized_schema(
@@ -222,25 +246,40 @@ def ensure_normalized_schema(
     if not column_mappings:
         return False
 
-    existing_columns = set(_fetch_existing_columns(connection, table))
+    existing_columns = {
+        column["name"]: column for column in _fetch_existing_columns(connection, table)
+    }
     additions: list[tuple[str, str]] = []
+    modifications: list[tuple[str, str]] = []
     for column in column_mappings:
         if column in _METADATA_COLUMNS:
             continue
-        if column in existing_columns:
-            continue
-        column_type = None
+        override_type = None
         if column_types:
-            column_type = column_types.get(column)
-            if column_type is not None:
-                column_type = str(column_type).strip()
-        if not column_type:
-            column_type = _COLUMN_TYPE_OVERRIDES.get(column)
-        if not column_type:
-            column_type = "VARCHAR(255) NULL"
-        additions.append((column, column_type))
+            override_type = column_types.get(column)
+            if override_type is not None:
+                override_type = str(override_type).strip()
+        if not override_type:
+            override_type = _COLUMN_TYPE_OVERRIDES.get(column)
+        if not override_type:
+            override_type = "VARCHAR(255) NULL"
 
-    if not additions:
+        existing = existing_columns.get(column)
+        if existing is None:
+            additions.append((column, override_type))
+            continue
+
+        actual_type = _normalise_sql_type(
+            existing.get("type"),
+            default_nullability="NULL"
+            if existing.get("is_nullable", True)
+            else "NOT NULL",
+        )
+        desired_type = _normalise_sql_type(override_type, default_nullability="NULL")
+        if actual_type != desired_type:
+            modifications.append((column, override_type))
+
+    if not additions and not modifications:
         return False
 
     with connection.cursor() as cursor:
@@ -248,6 +287,11 @@ def ensure_normalized_schema(
             cursor.execute(
                 f"ALTER TABLE {_quote_identifier(table)} "
                 f"ADD COLUMN {_quote_identifier(column)} {column_type}"
+            )
+        for column, column_type in modifications:
+            cursor.execute(
+                f"ALTER TABLE {_quote_identifier(table)} "
+                f"MODIFY COLUMN {_quote_identifier(column)} {column_type}"
             )
     return True
 

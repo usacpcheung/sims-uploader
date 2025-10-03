@@ -170,7 +170,13 @@ def test_ensure_normalized_schema_alters_missing_columns(monkeypatch, column_map
     monkeypatch.setattr(
         normalize_staging,
         "_fetch_existing_columns",
-        lambda conn, table: ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"],
+        lambda conn, table: [
+            {"name": "raw_id", "type": "int(11)", "is_nullable": False},
+            {"name": "file_hash", "type": "varchar(64)", "is_nullable": False},
+            {"name": "batch_id", "type": "varchar(64)", "is_nullable": True},
+            {"name": "source_year", "type": "int(11)", "is_nullable": True},
+            {"name": "ingested_at", "type": "datetime", "is_nullable": True},
+        ],
     )
 
     changed = normalize_staging.ensure_normalized_schema(
@@ -190,7 +196,13 @@ def test_ensure_normalized_schema_uses_column_type_overrides(monkeypatch):
     monkeypatch.setattr(
         normalize_staging,
         "_fetch_existing_columns",
-        lambda conn, table: ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"],
+        lambda conn, table: [
+            {"name": "raw_id", "type": "int(11)", "is_nullable": False},
+            {"name": "file_hash", "type": "varchar(64)", "is_nullable": False},
+            {"name": "batch_id", "type": "varchar(64)", "is_nullable": True},
+            {"name": "source_year", "type": "int(11)", "is_nullable": True},
+            {"name": "ingested_at", "type": "datetime", "is_nullable": True},
+        ],
     )
 
     mappings = {"教學跟進/回饋": "教學跟進/回饋"}
@@ -205,6 +217,64 @@ def test_ensure_normalized_schema_uses_column_type_overrides(monkeypatch):
     alter_statements = [sql for sql, _ in cursor.execute_calls if sql.startswith("ALTER TABLE")]
     assert alter_statements
     assert "TEXT NULL" in alter_statements[0]
+
+
+def test_ensure_normalized_schema_modifies_existing_column_type(monkeypatch):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    monkeypatch.setattr(
+        normalize_staging,
+        "_fetch_existing_columns",
+        lambda conn, table: [
+            {"name": "raw_id", "type": "int(11)", "is_nullable": False},
+            {"name": "file_hash", "type": "varchar(64)", "is_nullable": False},
+            {"name": "教學跟進/回饋", "type": "varchar(255)", "is_nullable": True},
+        ],
+    )
+
+    mappings = {"教學跟進/回饋": "教學跟進/回饋"}
+    changed = normalize_staging.ensure_normalized_schema(
+        connection,
+        "teach_record_normalized",
+        mappings,
+        {"教學跟進/回饋": "TEXT NULL"},
+    )
+
+    assert changed is True
+    assert (
+        "ALTER TABLE `teach_record_normalized` MODIFY COLUMN `教學跟進/回饋` TEXT NULL",
+        (),
+    ) in cursor.execute_calls
+
+
+def test_ensure_normalized_schema_skips_modify_when_type_matches(monkeypatch):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    monkeypatch.setattr(
+        normalize_staging,
+        "_fetch_existing_columns",
+        lambda conn, table: [
+            {"name": "raw_id", "type": "int(11)", "is_nullable": False},
+            {"name": "file_hash", "type": "varchar(64)", "is_nullable": False},
+            {"name": "教學跟進/回饋", "type": "text", "is_nullable": True},
+        ],
+    )
+
+    mappings = {"教學跟進/回饋": "教學跟進/回饋"}
+    changed = normalize_staging.ensure_normalized_schema(
+        connection,
+        "teach_record_normalized",
+        mappings,
+        {"教學跟進/回饋": "TEXT NULL"},
+    )
+
+    assert changed is False
+    assert all(
+        not sql.startswith("ALTER TABLE `teach_record_normalized` MODIFY")
+        for sql, _ in cursor.execute_calls
+    )
 
 
 def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):

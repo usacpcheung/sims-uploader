@@ -266,6 +266,17 @@ def _get_table_config(
         return config[sheet]
     except KeyError as exc:
         raise ValueError(f"Unsupported sheet name: {sheet!r}") from exc
+def _normalise_sql_type(type_text: str, *, default_nullability: str | None = None) -> str:
+    text = " ".join(str(type_text).strip().upper().split())
+    if not text:
+        return text
+    if default_nullability:
+        has_nullability = " NULL" in text or " NOT NULL" in text
+        if not has_nullability:
+            text = f"{text} {default_nullability}"
+    return text
+
+
 def _fetch_table_columns(
     table_name: str, *, connection=None, db_settings: Mapping[str, object] | None = None
 ) -> list[dict[str, object]]:
@@ -283,7 +294,7 @@ def _fetch_table_columns(
         with connection.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(
                 """
-                SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT
+                SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_TYPE
                   FROM information_schema.COLUMNS
                  WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
               ORDER BY ORDINAL_POSITION
@@ -300,6 +311,7 @@ def _fetch_table_columns(
             "name": row["COLUMN_NAME"],
             "is_nullable": str(row["IS_NULLABLE"]).upper() == "YES",
             "default": row["COLUMN_DEFAULT"],
+            "type": row["COLUMN_TYPE"],
         }
         for row in rows
     ]
@@ -326,14 +338,15 @@ def _ensure_staging_columns(
         connection = pymysql.connect(**settings)
 
     try:
-        existing_columns = {
-            column["name"]
+        column_details = {
+            column["name"]: column
             for column in _fetch_table_columns(
                 table_name, connection=connection, db_settings=db_settings
             )
         }
 
-        missing_columns: list[str] = []
+        missing_columns: list[tuple[str, str]] = []
+        modify_columns: list[tuple[str, str]] = []
         seen: set[str] = set()
         for header in headers:
             if header in seen:
@@ -343,22 +356,38 @@ def _ensure_staging_columns(
                 continue
             if header in metadata_columns:
                 continue
-            if header in existing_columns:
+            column_type_override = column_types.get(header)
+            if column_type_override is not None:
+                column_type_override = str(column_type_override).strip()
+            if header in column_details:
+                if column_type_override:
+                    existing = column_details[header]
+                    actual = _normalise_sql_type(
+                        existing.get("type"),
+                        default_nullability="NULL"
+                        if existing.get("is_nullable", True)
+                        else "NOT NULL",
+                    )
+                    desired = _normalise_sql_type(
+                        column_type_override, default_nullability="NULL"
+                    )
+                    if actual != desired:
+                        modify_columns.append((header, column_type_override))
                 continue
-            missing_columns.append(header)
+            column_type_sql = column_type_override or "VARCHAR(255) NULL"
+            missing_columns.append((header, column_type_sql))
 
-        if not missing_columns:
+        if not missing_columns and not modify_columns:
             return False
 
         with connection.cursor() as cursor:
-            for column in missing_columns:
-                column_type = column_types.get(column)
-                if column_type is not None:
-                    column_type = str(column_type).strip()
-                if not column_type:
-                    column_type = "VARCHAR(255) NULL"
+            for column, column_type in missing_columns:
                 cursor.execute(
                     f"ALTER TABLE {_quote_identifier(table_name)} ADD COLUMN {_quote_identifier(column)} {column_type}"
+                )
+            for column, column_type in modify_columns:
+                cursor.execute(
+                    f"ALTER TABLE {_quote_identifier(table_name)} MODIFY COLUMN {_quote_identifier(column)} {column_type}"
                 )
         connection.commit()
         return True

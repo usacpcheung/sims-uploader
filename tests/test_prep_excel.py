@@ -143,11 +143,36 @@ class PrepExcelSchemaTests(unittest.TestCase):
             }
         ]
         rows = [
-            {"COLUMN_NAME": "id", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "日期", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "任教老師", "IS_NULLABLE": "YES", "COLUMN_DEFAULT": ""},
-            {"COLUMN_NAME": "file_hash", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "學生編號", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {
+                "COLUMN_NAME": "id",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "int(11)",
+            },
+            {
+                "COLUMN_NAME": "日期",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "date",
+            },
+            {
+                "COLUMN_NAME": "任教老師",
+                "IS_NULLABLE": "YES",
+                "COLUMN_DEFAULT": "",
+                "COLUMN_TYPE": "varchar(255)",
+            },
+            {
+                "COLUMN_NAME": "file_hash",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(64)",
+            },
+            {
+                "COLUMN_NAME": "學生編號",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(32)",
+            },
         ]
 
         config_connection = _FakeConnection(config_rows)
@@ -203,10 +228,30 @@ class PrepExcelSchemaTests(unittest.TestCase):
             }
         ]
         rows = [
-            {"COLUMN_NAME": "id", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "日期", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "任教老師", "IS_NULLABLE": "YES", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "file_hash", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {
+                "COLUMN_NAME": "id",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "int(11)",
+            },
+            {
+                "COLUMN_NAME": "日期",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "date",
+            },
+            {
+                "COLUMN_NAME": "任教老師",
+                "IS_NULLABLE": "YES",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(255)",
+            },
+            {
+                "COLUMN_NAME": "file_hash",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(64)",
+            },
         ]
 
         config_connection = _FakeConnection(config_rows)
@@ -280,10 +325,30 @@ class PrepExcelSchemaTests(unittest.TestCase):
             }
         ]
         column_rows = [
-            {"COLUMN_NAME": "id", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "日期", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "任教老師", "IS_NULLABLE": "YES", "COLUMN_DEFAULT": None},
-            {"COLUMN_NAME": "file_hash", "IS_NULLABLE": "NO", "COLUMN_DEFAULT": None},
+            {
+                "COLUMN_NAME": "id",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "int(11)",
+            },
+            {
+                "COLUMN_NAME": "日期",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "date",
+            },
+            {
+                "COLUMN_NAME": "任教老師",
+                "IS_NULLABLE": "YES",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(255)",
+            },
+            {
+                "COLUMN_NAME": "file_hash",
+                "IS_NULLABLE": "NO",
+                "COLUMN_DEFAULT": None,
+                "COLUMN_TYPE": "varchar(64)",
+            },
         ]
 
         connection = _SequenceConnection(
@@ -371,11 +436,26 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_get_table_config.return_value = config
 
         existing = [
-            {"name": "日期", "is_nullable": True, "default": None},
-            {"name": "任教老師", "is_nullable": True, "default": None},
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "任教老師",
+                "is_nullable": True,
+                "default": None,
+                "type": "varchar(255)",
+            },
         ]
         expanded = existing + [
-            {"name": "新欄位", "is_nullable": True, "default": None},
+            {
+                "name": "新欄位",
+                "is_nullable": True,
+                "default": None,
+                "type": "varchar(255)",
+            },
         ]
         mock_fetch_columns.side_effect = [existing, expanded]
 
@@ -438,10 +518,20 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_get_table_config.return_value = config
 
         existing = [
-            {"name": "日期", "is_nullable": True, "default": None},
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
         ]
         expanded = existing + [
-            {"name": "教學跟進/回饋", "is_nullable": True, "default": None},
+            {
+                "name": "教學跟進/回饋",
+                "is_nullable": True,
+                "default": None,
+                "type": "text",
+            },
         ]
         mock_fetch_columns.side_effect = [existing, expanded]
 
@@ -461,6 +551,143 @@ class PrepExcelSchemaTests(unittest.TestCase):
             "ALTER TABLE `teach_record_raw` ADD COLUMN `教學跟進/回饋` TEXT NULL",
             None,
         ) in connection.commands
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_modifies_existing_staging_column_type_when_override_differs(
+        self,
+        mock_read_excel,
+        mock_fetch_columns,
+        mock_get_table_config,
+        _mock_hash_exists,
+    ):
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "教學跟進/回饋": ["feedback"],
+            }
+        )
+        mock_read_excel.return_value = df
+
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(
+                {"file_hash", "batch_id", "source_year", "ingested_at"}
+            ),
+            "options": {},
+            "column_types": {"教學跟進/回饋": "TEXT NULL"},
+        }
+        mock_get_table_config.return_value = config
+
+        existing = [
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "教學跟進/回饋",
+                "is_nullable": True,
+                "default": None,
+                "type": "varchar(255)",
+            },
+        ]
+        refreshed = [
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "教學跟進/回饋",
+                "is_nullable": True,
+                "default": None,
+                "type": "text",
+            },
+        ]
+        mock_fetch_columns.side_effect = [existing, refreshed]
+
+        connection = _AlteringConnection()
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", return_value=None):
+                prep_excel.main(excel_path, connection=connection, emit_stdout=False)
+        finally:
+            os.remove(excel_path)
+
+        assert (
+            "ALTER TABLE `teach_record_raw` MODIFY COLUMN `教學跟進/回饋` TEXT NULL",
+            None,
+        ) in connection.commands
+        self.assertEqual(connection.commits, 1)
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_skips_modify_when_staging_column_matches_override(
+        self,
+        mock_read_excel,
+        mock_fetch_columns,
+        mock_get_table_config,
+        _mock_hash_exists,
+    ):
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "教學跟進/回饋": ["feedback"],
+            }
+        )
+        mock_read_excel.return_value = df
+
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(
+                {"file_hash", "batch_id", "source_year", "ingested_at"}
+            ),
+            "options": {},
+            "column_types": {"教學跟進/回饋": "TEXT NULL"},
+        }
+        mock_get_table_config.return_value = config
+
+        existing = [
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "教學跟進/回饋",
+                "is_nullable": True,
+                "default": None,
+                "type": "text",
+            },
+        ]
+        mock_fetch_columns.side_effect = [existing, existing]
+
+        connection = _AlteringConnection()
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"dummy")
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", return_value=None):
+                prep_excel.main(excel_path, connection=connection, emit_stdout=False)
+        finally:
+            os.remove(excel_path)
+
+        self.assertEqual(connection.commands, [])
+        self.assertEqual(connection.commits, 0)
 
     def test_staging_file_hash_exists_with_injected_connection(self):
         connection = _SequenceConnection([
