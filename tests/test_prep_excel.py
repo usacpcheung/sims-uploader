@@ -191,6 +191,30 @@ class PrepExcelSchemaTests(unittest.TestCase):
             },
         )
 
+    def test_sheet_config_prefers_row_with_normalized_table(self):
+        generic_row = {
+            "sheet_name": prep_excel.DEFAULT_SHEET,
+            "staging_table": "teach_record_raw",
+            "metadata_columns": json.dumps(["id", "file_hash"]),
+            "required_columns": json.dumps([]),
+            "options": json.dumps({}),
+        }
+        specific_row = {
+            "sheet_name": prep_excel.DEFAULT_SHEET,
+            "staging_table": "teach_record_raw",
+            "metadata_columns": json.dumps(["id", "file_hash"]),
+            "required_columns": json.dumps([]),
+            "options": json.dumps({"normalized_table": "teach_record_normalized"}),
+        }
+
+        connection = _FakeConnection([generic_row, specific_row])
+
+        config = prep_excel._get_table_config(
+            prep_excel.DEFAULT_SHEET, connection=connection
+        )
+
+        self.assertEqual(config["normalized_table"], "teach_record_normalized")
+
     def test_get_schema_details_with_injected_connection(self):
         config_rows = [
             {

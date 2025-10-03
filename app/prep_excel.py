@@ -142,7 +142,17 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         normalized_table = row.get("normalized_table")
         if normalized_table is None and isinstance(options, Mapping):
             normalized_table = options.get("normalized_table")
-        config[row["sheet_name"]] = {
+        sheet_name = row["sheet_name"]
+        existing = config.get(sheet_name)
+        if (
+            existing is not None
+            and existing.get("normalized_table") is not None
+            and normalized_table is None
+        ):
+            # Preserve workbook-specific configuration that already defines the
+            # normalization target when a more generic row lacks it.
+            continue
+        config[sheet_name] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
             "required_columns": frozenset(required_columns),
