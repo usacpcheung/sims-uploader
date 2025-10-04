@@ -33,7 +33,7 @@ CREATE TABLE `teach_record_normalized` (
   `練習` VARCHAR(255) NULL,
   `上課時數` DECIMAL(6,2) NULL,
   `備註` VARCHAR(255) NULL,
-  `教學跟進/回饋` VARCHAR(255) NULL,
+  `教學跟進/回饋` TEXT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_teach_record_normalized_raw` (`raw_id`),
   KEY `idx_teach_record_normalized_file_hash` (`file_hash`)
