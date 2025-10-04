@@ -6,6 +6,8 @@ import csv
 import logging
 import os
 import sys
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -16,11 +18,39 @@ if __package__ in {None, ""}:  # pragma: no cover - exercised via dedicated unit
         sys.path.insert(0, str(project_root))
 
 import pymysql
+from pymysql import err as pymysql_err
+
+from pymysql.constants import ER
 
 from app.config import get_db_settings
 from app import prep_excel
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StagingLoadResult:
+    """Metadata describing a successful staging-table load."""
+
+    staging_table: str
+    file_hash: str
+    batch_id: str
+    source_year: str
+    ingested_at: datetime
+    rowcount: int
+
+
+def _extract_scalar(result: object) -> object | None:
+    if result is None:
+        return None
+    if isinstance(result, Mapping):
+        try:
+            return next(iter(result.values()))
+        except StopIteration:
+            return None
+    if isinstance(result, (tuple, list)):
+        return result[0] if result else None
+    return result
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -41,16 +71,26 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--batch-id",
         help="Optional batch identifier to associate with the upload",
     )
+    parser.add_argument(
+        "--workbook-type",
+        default="default",
+        help="Workbook type used to select configuration overrides (default: %(default)s)",
+    )
     return parser.parse_args(argv)
 
 
-def _read_csv_header(csv_path: str) -> list[str]:
+def _read_csv_header(csv_path: str) -> tuple[list[str], bool]:
     with open(csv_path, newline="", encoding="utf-8") as csv_file:
         reader = csv.reader(csv_file)
         try:
-            return next(reader)
+            header = next(reader)
         except StopIteration:
-            return []
+            return [], False
+        try:
+            next(reader)
+        except StopIteration:
+            return header, False
+        return header, True
 
 
 def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str, object]:
@@ -59,47 +99,46 @@ def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str,
         settings.update(overrides)
     settings.update(
         {
-            "allow_local_infile": True,
+            "local_infile": True,
             "client_flag": pymysql.constants.CLIENT.LOCAL_FILES,
         }
     )
     return settings
 
 
-def main(
-    workbook_path: str,
-    sheet: str = prep_excel.DEFAULT_SHEET,
+def load_csv_into_staging(
+    csv_path: str,
     *,
+    sheet: str,
+    workbook_type: str = "default",
     source_year: str,
+    file_hash: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
-) -> None:
-    csv_path, file_hash = prep_excel.main(
-        workbook_path,
-        sheet,
-        emit_stdout=False,
-        db_settings=db_settings,
-    )
-
-    if csv_path is None:
-        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
-        return
+) -> StagingLoadResult:
+    """Load a prepared CSV file into the staging table and return metadata."""
 
     config = prep_excel._get_table_config(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     table_name = config["table"]
     schema = prep_excel.get_schema_details(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     ordered_columns = schema["order"]
 
-    header = _read_csv_header(csv_path)
+    header, has_data_rows = _read_csv_header(csv_path)
     if header != ordered_columns:
         raise ValueError(
             "CSV header does not match expected column order"
             f" for table {table_name}: {header!r} != {ordered_columns!r}"
         )
+    if not has_data_rows:
+        raise ValueError("CSV contains no data rows to load")
 
     column_list = ", ".join(f"`{column}`" for column in ordered_columns)
     load_sql = (
@@ -107,15 +146,45 @@ def main(
         "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
         "LINES TERMINATED BY '\n' IGNORE 1 LINES "
         f"({column_list}) "
-        "SET file_hash = %s, batch_id = COALESCE(%s, UUID()), "
+        "SET file_hash = %s, batch_id = %s, "
         "source_year = %s, ingested_at = %s"
     )
+
+    if batch_id is None:
+        batch_id = str(uuid.uuid4())
 
     settings = _get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
     try:
         ingested_at = datetime.now(timezone.utc)
         connection.begin()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT @@local_infile")
+                local_infile_result = cursor.fetchone()
+        except pymysql_err.OperationalError as exc:  # pragma: no cover - defensive
+            if exc.args and exc.args[0] == ER.OPTION_PREVENTS_STATEMENT:
+                raise RuntimeError(
+                    "MySQL server has disabled LOCAL INFILE; enable it before loading"
+                ) from exc
+            raise
+
+        local_infile_enabled = bool(_extract_scalar(local_infile_result))
+        if not local_infile_enabled:
+            raise RuntimeError(
+                "MySQL server has disabled LOCAL INFILE; enable it before loading"
+            )
+
+        if prep_excel._staging_file_hash_exists(
+            table_name,
+            file_hash,
+            connection=connection,
+            db_settings=db_settings,
+        ):
+            raise RuntimeError(
+                f"File hash {file_hash} already exists in staging table {table_name}; skipping."
+            )
+
         with connection.cursor() as cursor:
             cursor.execute(
                 load_sql,
@@ -128,20 +197,71 @@ def main(
                 ),
             )
             rowcount = cursor.rowcount
+            if rowcount == -1:
+                cursor.execute("SELECT ROW_COUNT()")
+                rowcount_result = cursor.fetchone()
+                rowcount = int(_extract_scalar(rowcount_result) or 0)
+            if not rowcount:
+                raise RuntimeError("LOAD DATA did not insert any rows")
         connection.commit()
     except Exception:
         connection.rollback()
         raise
-    else:
-        LOGGER.info(
-            "Loaded %s rows into %s (hash=%s, source_year=%s)",
-            rowcount,
-            table_name,
-            file_hash,
-            source_year,
-        )
     finally:
         connection.close()
+
+    return StagingLoadResult(
+        staging_table=table_name,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        source_year=str(source_year),
+        ingested_at=ingested_at,
+        rowcount=rowcount,
+    )
+
+
+def main(
+    workbook_path: str,
+    sheet: str = prep_excel.DEFAULT_SHEET,
+    *,
+    workbook_type: str = "default",
+    source_year: str,
+    batch_id: str | None = None,
+    db_settings: Mapping[str, object] | None = None,
+) -> None:
+    if not source_year or str(source_year).strip() == "":
+        raise ValueError("source_year is required")
+
+    csv_path, file_hash = prep_excel.main(
+        workbook_path,
+        sheet,
+        workbook_type=workbook_type,
+        emit_stdout=False,
+        db_settings=db_settings,
+    )
+
+    if csv_path is None:
+        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
+        return
+
+    result = load_csv_into_staging(
+        csv_path,
+        sheet=sheet,
+        workbook_type=workbook_type,
+        source_year=source_year,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        db_settings=db_settings,
+    )
+
+    LOGGER.info(
+        "Loaded %s rows into %s (hash=%s, source_year=%s, batch_id=%s)",
+        result.rowcount,
+        result.staging_table,
+        result.file_hash,
+        result.source_year,
+        result.batch_id,
+    )
 
 
 def cli(argv: Iterable[str] | None = None) -> None:
@@ -149,6 +269,7 @@ def cli(argv: Iterable[str] | None = None) -> None:
     main(
         args.workbook,
         args.sheet,
+        workbook_type=args.workbook_type,
         source_year=args.source_year,
         batch_id=args.batch_id,
     )
