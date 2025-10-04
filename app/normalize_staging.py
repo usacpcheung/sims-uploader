@@ -11,14 +11,20 @@ from typing import Callable, Iterable, Mapping, Sequence
 from app.prep_excel import _default_metadata_column_definitions, TableMissingError
 
 # Metadata fields that should always be preserved for downstream joins.
-_METADATA_COLUMNS = ["raw_id", "file_hash", "batch_id", "source_year", "ingested_at"]
+DEFAULT_METADATA_COLUMNS = (
+    "raw_id",
+    "file_hash",
+    "batch_id",
+    "source_year",
+    "ingested_at",
+)
 
 # Source-side columns that should never be copied directly into the normalized
 # payload because they are handled separately (or represent bookkeeping data).
-_RESERVED_SOURCE_COLUMNS = {"id", "processed_at"}
+DEFAULT_RESERVED_SOURCE_COLUMNS = ("id", "processed_at")
 
 # Certain columns require stronger typing than the default VARCHAR fallback.
-_COLUMN_TYPE_OVERRIDES = {
+DEFAULT_COLUMN_TYPE_OVERRIDES = {
     "日期": "DATE NULL",
     "上課時數": "DECIMAL(6,2) NULL",
 }
@@ -31,6 +37,71 @@ class TableConfig:
     staging_table: str
     normalized_table: str
     column_mappings: Mapping[str, str]
+
+
+def _dedupe_preserve(values: Iterable[object]) -> list[str]:
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _resolve_metadata_columns(
+    metadata_columns: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if metadata_columns is None:
+        return tuple(DEFAULT_METADATA_COLUMNS)
+
+    cleaned = _dedupe_preserve(metadata_columns)
+    if not cleaned:
+        return tuple(DEFAULT_METADATA_COLUMNS)
+
+    for default in DEFAULT_METADATA_COLUMNS:
+        if default not in cleaned:
+            cleaned.append(default)
+
+    return tuple(cleaned)
+
+
+def _resolve_reserved_source_columns(
+    reserved_source_columns: Iterable[str] | None,
+) -> frozenset[str]:
+    defaults = set(DEFAULT_RESERVED_SOURCE_COLUMNS)
+    if reserved_source_columns is None:
+        return frozenset(defaults)
+
+    cleaned = _dedupe_preserve(reserved_source_columns)
+    if cleaned:
+        defaults.update(cleaned)
+    return frozenset(defaults)
+
+
+def _resolve_column_type_overrides(
+    overrides: Mapping[str, str] | None,
+) -> dict[str, str]:
+    merged: dict[str, str] = dict(DEFAULT_COLUMN_TYPE_OVERRIDES)
+    if overrides is None:
+        return merged
+
+    for key, value in overrides.items():
+        column_name = str(key).strip()
+        if not column_name:
+            continue
+        if value is None:
+            merged.pop(column_name, None)
+            continue
+        column_type = str(value).strip()
+        if not column_type:
+            merged.pop(column_name, None)
+            continue
+        merged[column_name] = column_type
+
+    return merged
 
 
 def _coerce_date(value) -> _dt.date | None:
@@ -135,8 +206,15 @@ def _normalise_metadata(column: str, row: Mapping[str, object]):
 def resolve_column_mappings(
     rows: Sequence[Mapping[str, object]],
     column_mappings: Mapping[str, str] | None,
+    *,
+    metadata_columns: Sequence[str] | None = None,
+    reserved_source_columns: Iterable[str] | None = None,
 ) -> "OrderedDict[str, str]":
     """Expand configured mappings with any new staging columns."""
+
+    metadata = _resolve_metadata_columns(metadata_columns)
+    metadata_set = set(metadata)
+    reserved = _resolve_reserved_source_columns(reserved_source_columns)
 
     resolved: "OrderedDict[str, str]" = OrderedDict()
     if column_mappings:
@@ -146,9 +224,9 @@ def resolve_column_mappings(
     if rows:
         staging_columns = list(rows[0].keys())
         for column in staging_columns:
-            if column in _RESERVED_SOURCE_COLUMNS:
+            if column in reserved:
                 continue
-            if column in _METADATA_COLUMNS:
+            if column in metadata_set:
                 continue
             if column in resolved:
                 continue
@@ -161,8 +239,11 @@ def resolve_column_mappings(
     return resolved
 
 
-def _build_ordered_columns(column_mappings: Mapping[str, str]) -> list[str]:
-    ordered = list(_METADATA_COLUMNS)
+def _build_ordered_columns(
+    column_mappings: Mapping[str, str],
+    metadata_columns: Sequence[str],
+) -> list[str]:
+    ordered = list(metadata_columns)
     for column in column_mappings:
         if column in ordered:
             continue
@@ -170,11 +251,16 @@ def _build_ordered_columns(column_mappings: Mapping[str, str]) -> list[str]:
     return ordered
 
 
-def _build_row(row: Mapping[str, object], column_mappings: Mapping[str, str]) -> tuple[object, ...]:
+def _build_row(
+    row: Mapping[str, object],
+    column_mappings: Mapping[str, str],
+    metadata_columns: Sequence[str],
+) -> tuple[object, ...]:
     values: list[object] = []
-    ordered_columns = _build_ordered_columns(column_mappings)
+    ordered_columns = _build_ordered_columns(column_mappings, metadata_columns)
+    metadata_set = set(metadata_columns)
     for column in ordered_columns:
-        if column in _METADATA_COLUMNS:
+        if column in metadata_set:
             values.append(_normalise_metadata(column, row))
             continue
         source_column = column_mappings.get(column)
@@ -184,9 +270,13 @@ def _build_row(row: Mapping[str, object], column_mappings: Mapping[str, str]) ->
 
 
 def build_insert_statement(
-    table: str, column_mappings: Mapping[str, str]
+    table: str,
+    column_mappings: Mapping[str, str],
+    *,
+    metadata_columns: Sequence[str] | None = None,
 ) -> tuple[str, list[str]]:
-    ordered_columns = _build_ordered_columns(column_mappings)
+    metadata = _resolve_metadata_columns(metadata_columns)
+    ordered_columns = _build_ordered_columns(column_mappings, metadata)
     column_sql = ", ".join(f"`{name}`" for name in ordered_columns)
     placeholders = ", ".join(["%s"] * len(ordered_columns))
     sql = f"INSERT INTO `{table}` ({column_sql}) VALUES ({placeholders})"
@@ -196,10 +286,13 @@ def build_insert_statement(
 def prepare_rows(
     rows: Iterable[Mapping[str, object]],
     column_mappings: Mapping[str, str],
+    *,
+    metadata_columns: Sequence[str] | None = None,
 ) -> list[tuple[object, ...]]:
     prepared: list[tuple[object, ...]] = []
+    metadata = _resolve_metadata_columns(metadata_columns)
     for row in rows:
-        prepared.append(_build_row(row, column_mappings))
+        prepared.append(_build_row(row, column_mappings, metadata))
     return prepared
 
 
@@ -237,7 +330,9 @@ def _fetch_existing_columns(connection, table: str) -> list[dict[str, object]]:
     return columns
 
 
-def _normalized_metadata_column_definitions() -> "OrderedDict[str, str]":
+def _normalized_metadata_column_definitions(
+    metadata_columns: Sequence[str],
+) -> "OrderedDict[str, str]":
     defaults = _default_metadata_column_definitions()
     definitions: "OrderedDict[str, str]" = OrderedDict()
 
@@ -249,20 +344,27 @@ def _normalized_metadata_column_definitions() -> "OrderedDict[str, str]":
     for phrase in ("AUTO_INCREMENT", "PRIMARY KEY"):
         raw_id_definition = raw_id_definition.replace(phrase, "")
     raw_id_definition = " ".join(raw_id_definition.split())
-    definitions["raw_id"] = raw_id_definition if raw_id_definition else "BIGINT UNSIGNED NOT NULL"
+    definitions["raw_id"] = (
+        raw_id_definition if raw_id_definition else "BIGINT UNSIGNED NOT NULL"
+    )
 
-    for column in _METADATA_COLUMNS:
+    for column in metadata_columns:
         if column == "raw_id":
             continue
         default = defaults.get(column)
         if default:
             definitions[column] = default
+        else:
+            definitions[column] = "VARCHAR(255) NULL"
 
     return definitions
 
 
 def _resolve_normalized_column_type(
-    column: str, column_types: Mapping[str, str] | None
+    column: str,
+    column_types: Mapping[str, str] | None,
+    *,
+    column_type_overrides: Mapping[str, str],
 ) -> str:
     if column_types:
         override = column_types.get(column)
@@ -270,7 +372,7 @@ def _resolve_normalized_column_type(
             override = str(override).strip()
             if override:
                 return override
-    override = _COLUMN_TYPE_OVERRIDES.get(column)
+    override = column_type_overrides.get(column)
     if override:
         return override
     return "VARCHAR(255) NULL"
@@ -281,8 +383,10 @@ def _build_create_table_sql(
     *,
     column_mappings: Mapping[str, str],
     column_types: Mapping[str, str],
+    metadata_columns: Sequence[str],
+    column_type_overrides: Mapping[str, str],
 ) -> str:
-    metadata_definitions = _normalized_metadata_column_definitions()
+    metadata_definitions = _normalized_metadata_column_definitions(metadata_columns)
     added: set[str] = set()
     column_sql: list[str] = []
 
@@ -295,10 +399,19 @@ def _build_create_table_sql(
     for name, type_sql in metadata_definitions.items():
         append_column(name, type_sql)
 
+    metadata_set = set(metadata_columns)
+
     for name in column_mappings:
-        if name in added or name in _METADATA_COLUMNS:
+        if name in added or name in metadata_set:
             continue
-        append_column(name, _resolve_normalized_column_type(name, column_types))
+        append_column(
+            name,
+            _resolve_normalized_column_type(
+                name,
+                column_types,
+                column_type_overrides=column_type_overrides,
+            ),
+        )
 
     columns_joined = ",\n  ".join(column_sql)
     return (
@@ -313,9 +426,15 @@ def _create_normalized_table(
     *,
     column_mappings: Mapping[str, str],
     column_types: Mapping[str, str],
+    metadata_columns: Sequence[str],
+    column_type_overrides: Mapping[str, str],
 ) -> bool:
     create_sql = _build_create_table_sql(
-        table, column_mappings=column_mappings, column_types=column_types
+        table,
+        column_mappings=column_mappings,
+        column_types=column_types,
+        metadata_columns=metadata_columns,
+        column_type_overrides=column_type_overrides,
     )
     with connection.cursor() as cursor:
         cursor.execute(create_sql)
@@ -351,11 +470,18 @@ def ensure_normalized_schema(
     table: str,
     column_mappings: Mapping[str, str],
     column_types: Mapping[str, str] | None = None,
+    *,
+    metadata_columns: Sequence[str] | None = None,
+    column_type_overrides: Mapping[str, str] | None = None,
 ) -> bool:
     """Ensure the normalized table contains columns for every mapping key."""
 
     if not column_mappings:
         return False
+
+    metadata = _resolve_metadata_columns(metadata_columns)
+    metadata_set = set(metadata)
+    overrides = _resolve_column_type_overrides(column_type_overrides)
 
     try:
         existing_columns = {
@@ -368,12 +494,14 @@ def ensure_normalized_schema(
                 table,
                 column_mappings=column_mappings,
                 column_types=column_types or {},
+                metadata_columns=metadata,
+                column_type_overrides=overrides,
             )
         raise
     additions: list[tuple[str, str]] = []
     modifications: list[tuple[str, str]] = []
     for column in column_mappings:
-        if column in _METADATA_COLUMNS:
+        if column in metadata_set:
             continue
         override_type = None
         if column_types:
@@ -381,7 +509,7 @@ def ensure_normalized_schema(
             if override_type is not None:
                 override_type = str(override_type).strip()
         if not override_type:
-            override_type = _COLUMN_TYPE_OVERRIDES.get(column)
+            override_type = overrides.get(column)
         if not override_type:
             override_type = "VARCHAR(255) NULL"
 
@@ -422,12 +550,26 @@ def insert_normalized_rows(
     table: str,
     rows: Sequence[Mapping[str, object]],
     column_mappings: Mapping[str, str] | None = None,
+    *,
+    metadata_columns: Sequence[str] | None = None,
+    reserved_source_columns: Iterable[str] | None = None,
 ) -> int:
     if not rows:
         return 0
-    resolved_mappings = resolve_column_mappings(rows, column_mappings)
-    sql, _ = build_insert_statement(table, resolved_mappings)
-    prepared = prepare_rows(rows, resolved_mappings)
+    resolved_mappings = resolve_column_mappings(
+        rows,
+        column_mappings,
+        metadata_columns=metadata_columns,
+        reserved_source_columns=reserved_source_columns,
+    )
+    sql, _ = build_insert_statement(
+        table, resolved_mappings, metadata_columns=metadata_columns
+    )
+    prepared = prepare_rows(
+        rows,
+        resolved_mappings,
+        metadata_columns=metadata_columns,
+    )
     with connection.cursor() as cursor:
         cursor.executemany(sql, prepared)
         if getattr(cursor, "rowcount", None) not in (None, -1):

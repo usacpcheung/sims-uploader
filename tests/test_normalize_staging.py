@@ -170,6 +170,47 @@ def test_resolve_column_mappings_adds_new_columns():
     assert resolved["新欄位"] == "新欄位"
 
 
+def test_resolve_column_mappings_honours_custom_metadata_and_reserved():
+    rows = [
+        {
+            "id": 7,
+            "file_hash": "hash",
+            "batch_id": "batch-7",
+            "source_year": "2024",
+            "ingested_at": "2024-05-01T00:00:00",
+            "custom_meta": "meta",
+            "skip_me": "value",
+            "姓名": "Student",
+        }
+    ]
+    metadata_override = ["custom_meta", "raw_id", "file_hash"]
+    reserved_override = {"skip_me"}
+
+    resolved = normalize_staging.resolve_column_mappings(
+        rows,
+        None,
+        metadata_columns=metadata_override,
+        reserved_source_columns=reserved_override,
+    )
+
+    assert "skip_me" not in resolved
+    sql, columns = normalize_staging.build_insert_statement(
+        "teach_record_normalized",
+        resolved,
+        metadata_columns=metadata_override,
+    )
+    assert sql.startswith("INSERT INTO `teach_record_normalized`")
+    assert columns[:3] == ["custom_meta", "raw_id", "file_hash"]
+
+    prepared = normalize_staging.prepare_rows(
+        rows,
+        resolved,
+        metadata_columns=metadata_override,
+    )
+    assert prepared[0][0] == "meta"
+    assert prepared[0][1] == 7
+
+
 def test_ensure_normalized_schema_alters_missing_columns(monkeypatch, column_mappings):
     cursor = _Cursor()
     connection = _Connection(cursor)
@@ -226,6 +267,35 @@ def test_ensure_normalized_schema_creates_table_when_missing(
     assert "`ingested_at` DATETIME NOT NULL" in create_sql
     assert "`上課時數` DECIMAL(6,2) NULL" in create_sql
     assert "`教學跟進/回饋` TEXT NULL" in create_sql
+
+
+def test_ensure_normalized_schema_uses_configured_overrides(monkeypatch):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    monkeypatch.setattr(
+        normalize_staging,
+        "_fetch_existing_columns",
+        lambda conn, table: [
+            {"name": "raw_id", "type": "int(11)", "is_nullable": False},
+            {"name": "file_hash", "type": "varchar(64)", "is_nullable": False},
+        ],
+    )
+
+    mappings = {"特別欄": "特別欄"}
+    overrides = {"特別欄": "JSON NULL"}
+
+    changed = normalize_staging.ensure_normalized_schema(
+        connection,
+        "teach_record_normalized",
+        mappings,
+        {},
+        metadata_columns=["raw_id", "file_hash"],
+        column_type_overrides=overrides,
+    )
+
+    assert changed is True
+    assert any("JSON NULL" in sql for sql, _ in cursor.execute_calls)
 
 
 def test_ensure_normalized_schema_uses_column_type_overrides(monkeypatch):

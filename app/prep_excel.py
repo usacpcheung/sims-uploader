@@ -266,6 +266,9 @@ def _parse_sheet_config_rows(
                 normalized_table = option_value
                 normalized_table_source = "explicit"
         column_types: dict[str, str] = {}
+        normalized_metadata_columns: tuple[str, ...] | None = None
+        reserved_source_columns: frozenset[str] | None = None
+        normalized_column_type_overrides: dict[str, str] | None = None
         if isinstance(options, Mapping):
             raw_column_types = options.get("column_types")
             if isinstance(raw_column_types, Mapping):
@@ -279,6 +282,50 @@ def _parse_sheet_config_rows(
                     if not type_text:
                         continue
                     column_types[key_text] = type_text
+
+            raw_metadata_columns = options.get("normalized_metadata_columns")
+            if isinstance(raw_metadata_columns, (list, tuple, set)):
+                cleaned_metadata: list[str] = []
+                seen_metadata: set[str] = set()
+                for value in raw_metadata_columns:
+                    text = str(value).strip()
+                    if not text or text in seen_metadata:
+                        continue
+                    seen_metadata.add(text)
+                    cleaned_metadata.append(text)
+                if cleaned_metadata:
+                    normalized_metadata_columns = tuple(cleaned_metadata)
+
+            raw_reserved_columns = options.get("reserved_source_columns")
+            if isinstance(raw_reserved_columns, (list, tuple, set)):
+                cleaned_reserved: list[str] = []
+                seen_reserved: set[str] = set()
+                for value in raw_reserved_columns:
+                    text = str(value).strip()
+                    if not text or text in seen_reserved:
+                        continue
+                    seen_reserved.add(text)
+                    cleaned_reserved.append(text)
+                if cleaned_reserved:
+                    reserved_source_columns = frozenset(cleaned_reserved)
+
+            raw_normalized_overrides = options.get(
+                "normalized_column_type_overrides"
+            )
+            if isinstance(raw_normalized_overrides, Mapping):
+                cleaned_overrides: dict[str, str] = {}
+                for key, value in raw_normalized_overrides.items():
+                    key_text = str(key).strip()
+                    if not key_text:
+                        continue
+                    if value is None:
+                        continue
+                    type_text = str(value).strip()
+                    if not type_text:
+                        continue
+                    cleaned_overrides[key_text] = type_text
+                if cleaned_overrides:
+                    normalized_column_type_overrides = cleaned_overrides
         if normalized_table is None:
             staging_table = row.get("staging_table")
             if isinstance(staging_table, str):
@@ -308,6 +355,9 @@ def _parse_sheet_config_rows(
             "column_mappings": column_mappings,
             "normalized_table": normalized_table,
             "column_types": column_types,
+            "normalized_metadata_columns": normalized_metadata_columns,
+            "reserved_source_columns": reserved_source_columns,
+            "normalized_column_type_overrides": normalized_column_type_overrides,
         }
         normalized_sources[key] = normalized_table_source
     return config

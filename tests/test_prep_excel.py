@@ -528,6 +528,48 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         self.assertEqual(config["normalized_table"], "teach_record_normalized")
 
+    def test_parse_sheet_config_rows_includes_normalization_overrides(self):
+        row = {
+            "workbook_type": "default",
+            "sheet_name": prep_excel.DEFAULT_SHEET,
+            "staging_table": "teach_record_raw",
+            "metadata_columns": json.dumps(["id", "file_hash", "processed_at"]),
+            "required_columns": json.dumps([]),
+            "column_mappings": None,
+            "options": json.dumps(
+                {
+                    "normalized_metadata_columns": [
+                        "file_hash",
+                        "raw_id",
+                        "custom_meta",
+                        "raw_id",
+                    ],
+                    "reserved_source_columns": ["id", "custom_reserved", "id"],
+                    "normalized_column_type_overrides": {
+                        "日期": "DATETIME NULL",
+                        "上課時數": None,
+                        "": "ignored",
+                    },
+                }
+            ),
+        }
+
+        config = prep_excel._parse_sheet_config_rows([row])
+        entry = config["default"][prep_excel.DEFAULT_SHEET]
+
+        self.assertEqual(
+            entry["normalized_metadata_columns"],
+            ("file_hash", "raw_id", "custom_meta"),
+        )
+        self.assertEqual(
+            entry["reserved_source_columns"],
+            frozenset({"id", "custom_reserved"}),
+        )
+        self.assertEqual(
+            entry["normalized_column_type_overrides"],
+            {"日期": "DATETIME NULL"},
+        )
+
     def test_get_schema_details_with_injected_connection(self):
         config_rows = [
             {
