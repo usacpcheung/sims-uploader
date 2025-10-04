@@ -24,13 +24,16 @@ CREATE TABLE `teach_record_raw` (
   `教學重點3` VARCHAR(100) NULL,
   `教學重點4` VARCHAR(100) NULL,
   `自定課題` VARCHAR(100) NULL,
-  `自定教學重點` VARCHAR(255) NULL,
+  `自定教學重點` TEXT NULL,
   `練習` VARCHAR(100) NULL,
   `上課時數` VARCHAR(100) NULL,
-  `備註` VARCHAR(100) NULL,
-  `教學跟進/回饋` VARCHAR(255) NULL,
+  `備註` TEXT NULL,
+  `教學跟進/回饋` TEXT NULL,
   `file_hash` CHAR(64) NOT NULL,
   `batch_id` CHAR(36) NULL,
   `source_year` INT NULL,
-  `ingested_at` DATETIME NOT NULL
+  `ingested_at` DATETIME NOT NULL,
+  `processed_at` DATETIME NULL DEFAULT NULL,
+  KEY idx_teach_record_file_hash (file_hash),
+  KEY idx_teach_record_file_processed (file_hash, processed_at)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
