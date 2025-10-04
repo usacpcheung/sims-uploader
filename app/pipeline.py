@@ -127,16 +127,27 @@ def run_pipeline(
     if not column_mappings:
         column_mappings = None
     column_types = table_config.get("column_types") or {}
+    metadata_columns = table_config.get("normalized_metadata_columns")
+    reserved_source_columns = table_config.get("reserved_source_columns")
+    column_type_overrides = table_config.get("normalized_column_type_overrides")
 
     settings = ingest_excel._get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
     try:
         staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
         resolved_mappings = normalize_staging.resolve_column_mappings(
-            staging_rows, column_mappings
+            staging_rows,
+            column_mappings,
+            metadata_columns=metadata_columns,
+            reserved_source_columns=reserved_source_columns,
         )
         normalize_staging.ensure_normalized_schema(
-            connection, normalized_table, resolved_mappings, column_types
+            connection,
+            normalized_table,
+            resolved_mappings,
+            column_types,
+            metadata_columns=metadata_columns,
+            column_type_overrides=column_type_overrides,
         )
 
         connection.begin()
@@ -145,6 +156,8 @@ def run_pipeline(
             normalized_table,
             staging_rows,
             resolved_mappings,
+            metadata_columns=metadata_columns,
+            reserved_source_columns=reserved_source_columns,
         )
         processed_at = normalize_staging.mark_staging_rows_processed(
             connection,
