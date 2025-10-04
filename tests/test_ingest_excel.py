@@ -121,7 +121,11 @@ class IngestExcelTests(unittest.TestCase):
             ingest_excel.main("workbook.xlsx", source_year="2024")
 
         prep_main.assert_called_once_with(
-            "workbook.xlsx", ingest_excel.prep_excel.DEFAULT_SHEET, emit_stdout=False, db_settings=None
+            "workbook.xlsx",
+            ingest_excel.prep_excel.DEFAULT_SHEET,
+            workbook_type="default",
+            emit_stdout=False,
+            db_settings=None,
         )
         get_config.assert_called_once()
         get_schema.assert_called_once()
@@ -157,48 +161,24 @@ class IngestExcelTests(unittest.TestCase):
             ("abc", "12345678-1234-5678-1234-567812345678", "2024", self.now),
         )
 
-    def test_main_ignores_trailing_csv_columns(self):
+    def test_main_rejects_csv_with_extra_columns(self):
         schema_header = ["日期", "任教老師"]
         full_header = schema_header + ["Extra A", "Extra B"]
         csv_path = self._create_csv(full_header)
 
-        fake_cursor = _Cursor(rowcount=2, fetchone_results=[(1,)])
-        connection = _Connection(fake_cursor)
-
         with mock.patch.object(
             ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
-        ) as prep_main, mock.patch.object(
+        ), mock.patch.object(
             ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
-        ) as get_config, mock.patch.object(
+        ), mock.patch.object(
             ingest_excel.prep_excel, "get_schema_details", return_value={"order": schema_header}
-        ) as get_schema, mock.patch.object(
-            ingest_excel.pymysql, "connect", return_value=connection
+        ), mock.patch.object(
+            ingest_excel.pymysql, "connect"
         ) as connect:
-            ingest_excel.main("workbook.xlsx", source_year="2024", batch_id="batch-1")
+            with self.assertRaisesRegex(ValueError, "CSV header does not match"):
+                ingest_excel.main("workbook.xlsx", source_year="2024", batch_id="batch-1")
 
-        prep_main.assert_called_once()
-        get_config.assert_called_once()
-        get_schema.assert_called_once()
-        connect.assert_called_once()
-
-        self.assertTrue(connection.begun)
-        self.assertTrue(connection.committed)
-        self.assertFalse(connection.rolled_back)
-
-        self.assertEqual(len(fake_cursor.executed), 2)
-        query, params = fake_cursor.executed[1]
-        column_list = ", ".join(["`日期`", "`任教老師`", "@unused_0", "@unused_1"])
-        expected_query = (
-            "LOAD DATA LOCAL INFILE %s INTO TABLE `teach_record_raw` "
-            "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
-            "LINES TERMINATED BY '\n' IGNORE 1 LINES "
-            f"({column_list}) "
-            "SET file_hash = %s, batch_id = %s, source_year = %s, ingested_at = %s"
-        )
-        self.assertEqual(query, expected_query)
-        self.assertEqual(params[0], csv_path)
-        self.assertEqual(params[1:4], ("abc", "batch-1", "2024"))
-        self.assertEqual(params[4], self.now)
+        connect.assert_not_called()
 
     def test_main_logs_rowcount_for_multi_row_csv(self):
         header = ["日期", "任教老師"]

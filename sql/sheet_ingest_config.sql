@@ -26,7 +26,7 @@ VALUES (
     'prototype_teaching_records',
     'TEACH_RECORD',
     'teach_record_raw',
-    JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at'),
+    JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at', 'processed_at'),
     JSON_ARRAY(
         '記錄狀態',
         '日期',
@@ -89,7 +89,11 @@ VALUES (
         '備註', '備註',
         '教學跟進/回饋', '教學跟進/回饋'
     ),
-    JSON_OBJECT('rename_last_subject', true)
+    JSON_OBJECT(
+        'rename_last_subject', true,
+        'normalized_table', 'teach_record_normalized',
+        'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
+    )
 )
 ON DUPLICATE KEY UPDATE
     staging_table = VALUES(staging_table),

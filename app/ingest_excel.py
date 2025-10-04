@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -25,6 +26,18 @@ from app.config import get_db_settings
 from app import prep_excel
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StagingLoadResult:
+    """Metadata describing a successful staging-table load."""
+
+    staging_table: str
+    file_hash: str
+    batch_id: str
+    source_year: str
+    ingested_at: datetime
+    rowcount: int
 
 
 def _extract_scalar(result: object) -> object | None:
@@ -58,6 +71,11 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--batch-id",
         help="Optional batch identifier to associate with the upload",
     )
+    parser.add_argument(
+        "--workbook-type",
+        default="default",
+        help="Workbook type used to select configuration overrides (default: %(default)s)",
+    )
     return parser.parse_args(argv)
 
 
@@ -88,55 +106,41 @@ def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str,
     return settings
 
 
-def main(
-    workbook_path: str,
-    sheet: str = prep_excel.DEFAULT_SHEET,
+def load_csv_into_staging(
+    csv_path: str,
     *,
+    sheet: str,
+    workbook_type: str = "default",
     source_year: str,
+    file_hash: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
-) -> None:
-    if not source_year or str(source_year).strip() == "":
-        raise ValueError("source_year is required")
-
-    csv_path, file_hash = prep_excel.main(
-        workbook_path,
-        sheet,
-        emit_stdout=False,
-        db_settings=db_settings,
-    )
-
-    if csv_path is None:
-        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
-        return
+) -> StagingLoadResult:
+    """Load a prepared CSV file into the staging table and return metadata."""
 
     config = prep_excel._get_table_config(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     table_name = config["table"]
     schema = prep_excel.get_schema_details(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     ordered_columns = schema["order"]
 
     header, has_data_rows = _read_csv_header(csv_path)
-    if header[: len(ordered_columns)] != ordered_columns:
+    if header != ordered_columns:
         raise ValueError(
             "CSV header does not match expected column order"
-            f" for table {table_name}: {header!r} does not begin with {ordered_columns!r}"
+            f" for table {table_name}: {header!r} != {ordered_columns!r}"
         )
     if not has_data_rows:
         raise ValueError("CSV contains no data rows to load")
 
-    column_targets: list[str]
-    if len(header) > len(ordered_columns):
-        extra_count = len(header) - len(ordered_columns)
-        column_targets = [f"`{column}`" for column in ordered_columns]
-        column_targets.extend(f"@unused_{index}" for index in range(extra_count))
-    else:
-        column_targets = [f"`{column}`" for column in ordered_columns]
-
-    column_list = ", ".join(column_targets)
+    column_list = ", ".join(f"`{column}`" for column in ordered_columns)
     load_sql = (
         f"LOAD DATA LOCAL INFILE %s INTO TABLE `{table_name}` "
         "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
@@ -203,17 +207,61 @@ def main(
     except Exception:
         connection.rollback()
         raise
-    else:
-        LOGGER.info(
-            "Loaded %s rows into %s (hash=%s, source_year=%s, batch_id=%s)",
-            rowcount,
-            table_name,
-            file_hash,
-            source_year,
-            batch_id,
-        )
     finally:
         connection.close()
+
+    return StagingLoadResult(
+        staging_table=table_name,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        source_year=str(source_year),
+        ingested_at=ingested_at,
+        rowcount=rowcount,
+    )
+
+
+def main(
+    workbook_path: str,
+    sheet: str = prep_excel.DEFAULT_SHEET,
+    *,
+    workbook_type: str = "default",
+    source_year: str,
+    batch_id: str | None = None,
+    db_settings: Mapping[str, object] | None = None,
+) -> None:
+    if not source_year or str(source_year).strip() == "":
+        raise ValueError("source_year is required")
+
+    csv_path, file_hash = prep_excel.main(
+        workbook_path,
+        sheet,
+        workbook_type=workbook_type,
+        emit_stdout=False,
+        db_settings=db_settings,
+    )
+
+    if csv_path is None:
+        LOGGER.info("Skipping load for %s; duplicate hash %s", workbook_path, file_hash)
+        return
+
+    result = load_csv_into_staging(
+        csv_path,
+        sheet=sheet,
+        workbook_type=workbook_type,
+        source_year=source_year,
+        file_hash=file_hash,
+        batch_id=batch_id,
+        db_settings=db_settings,
+    )
+
+    LOGGER.info(
+        "Loaded %s rows into %s (hash=%s, source_year=%s, batch_id=%s)",
+        result.rowcount,
+        result.staging_table,
+        result.file_hash,
+        result.source_year,
+        result.batch_id,
+    )
 
 
 def cli(argv: Iterable[str] | None = None) -> None:
@@ -221,6 +269,7 @@ def cli(argv: Iterable[str] | None = None) -> None:
     main(
         args.workbook,
         args.sheet,
+        workbook_type=args.workbook_type,
         source_year=args.source_year,
         batch_id=args.batch_id,
     )
