@@ -132,10 +132,17 @@ def _freeze_db_settings(settings: Mapping[str, object]) -> tuple[tuple[str, obje
     return tuple(sorted((key, _freeze(val)) for key, val in settings.items()))
 
 
-def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
-    config: dict[str, dict[str, object]] = {}
-    normalized_sources: dict[str, str] = {}
+def _parse_sheet_config_rows(
+    rows: Sequence[Mapping[str, object]]
+) -> dict[str, dict[str, dict[str, object]]]:
+    config: dict[str, dict[str, dict[str, object]]] = {}
+    normalized_sources: dict[tuple[str, str], str] = {}
     for row in rows:
+        workbook_type = row.get("workbook_type")
+        if isinstance(workbook_type, str):
+            workbook_type = workbook_type.strip() or "default"
+        else:
+            workbook_type = "default"
         metadata_columns = _loads_json(row.get("metadata_columns")) or []
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
@@ -177,14 +184,16 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
                     normalized_table = f"{base_table}_normalized"
                     normalized_table_source = "derived"
         sheet_name = row["sheet_name"]
-        existing = config.get(sheet_name)
+        workbook_config = config.setdefault(workbook_type, {})
+        key = (workbook_type, sheet_name)
+        existing = workbook_config.get(sheet_name)
         if existing is not None:
-            existing_source = normalized_sources.get(sheet_name, "none")
+            existing_source = normalized_sources.get(key, "none")
             if existing_source == "explicit" and normalized_table_source != "explicit":
                 # Preserve workbook-specific configuration that already defines the
                 # normalization target when a more generic row lacks it.
                 continue
-        config[sheet_name] = {
+        workbook_config[sheet_name] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
             "required_columns": frozenset(required_columns),
@@ -193,16 +202,17 @@ def _parse_sheet_config_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, 
             "normalized_table": normalized_table,
             "column_types": column_types,
         }
-        normalized_sources[sheet_name] = normalized_table_source
+        normalized_sources[key] = normalized_table_source
     return config
 
 
-def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
+def _load_sheet_config(connection) -> dict[str, dict[str, dict[str, object]]]:
     with connection.cursor(pymysql.cursors.DictCursor) as cur:
         try:
             cur.execute(
                 f"""
-                SELECT sheet_name,
+                SELECT workbook_type,
+                       sheet_name,
                        staging_table,
                        metadata_columns,
                        required_columns,
@@ -228,6 +238,7 @@ def _load_sheet_config(connection) -> dict[str, dict[str, object]]:
             rows = cur.fetchall()
             for row in rows:
                 row.setdefault("column_mappings", None)
+                row["workbook_type"] = "default"
         else:
             rows = cur.fetchall()
     return _parse_sheet_config_rows(rows)
@@ -245,7 +256,7 @@ def _get_sheet_config_cached(settings_items: tuple[tuple[str, object], ...]):
 
 def _get_sheet_config(
     *, connection=None, db_settings: Mapping[str, object] | None = None
-) -> dict[str, dict[str, object]]:
+) -> dict[str, dict[str, dict[str, object]]]:
     if connection is not None:
         return _load_sheet_config(connection)
 
@@ -259,13 +270,25 @@ _get_sheet_config.cache_info = _get_sheet_config_cached.cache_info  # type: igno
 
 
 def _get_table_config(
-    sheet: str, *, connection=None, db_settings: Mapping[str, object] | None = None
+    sheet: str,
+    *,
+    workbook_type: str = "default",
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
 ):
-    config = _get_sheet_config(connection=connection, db_settings=db_settings)
-    try:
-        return config[sheet]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported sheet name: {sheet!r}") from exc
+    config_by_type = _get_sheet_config(connection=connection, db_settings=db_settings)
+    workbook_config = config_by_type.get(workbook_type)
+    if workbook_config is not None and sheet in workbook_config:
+        return workbook_config[sheet]
+
+    default_config = config_by_type.get("default", {})
+    if workbook_type != "default" and sheet in default_config:
+        return default_config[sheet]
+
+    if workbook_config is None and workbook_type != "default":
+        raise ValueError(f"Unsupported workbook type: {workbook_type!r}")
+
+    raise ValueError(f"Unsupported sheet name: {sheet!r}")
 def _normalise_sql_type(type_text: str, *, default_nullability: str | None = None) -> str:
     text = " ".join(str(type_text).strip().upper().split())
     if not text:
@@ -399,10 +422,16 @@ def _ensure_staging_columns(
 def get_schema_details(
     sheet: str = DEFAULT_SHEET,
     *,
+    workbook_type: str = "default",
     connection=None,
     db_settings: Mapping[str, object] | None = None,
 ) -> dict[str, list[str]]:
-    config = _get_table_config(sheet, connection=connection, db_settings=db_settings)
+    config = _get_table_config(
+        sheet,
+        workbook_type=workbook_type,
+        connection=connection,
+        db_settings=db_settings,
+    )
     metadata_columns = set(config.get("metadata_columns", ()))
     required_columns_config = set(config.get("required_columns", ()))
     columns = _fetch_table_columns(
@@ -430,11 +459,15 @@ def get_schema_details(
 def get_table_order(
     sheet: str = DEFAULT_SHEET,
     *,
+    workbook_type: str = "default",
     connection=None,
     db_settings: Mapping[str, object] | None = None,
 ) -> list[str]:
     schema = get_schema_details(
-        sheet, connection=connection, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        connection=connection,
+        db_settings=db_settings,
     )
     return schema["order"]
 
@@ -473,6 +506,7 @@ def main(
     xlsx_path,
     sheet=DEFAULT_SHEET,
     *,
+    workbook_type: str = "default",
     emit_stdout: bool = True,
     connection=None,
     db_settings: Mapping[str, object] | None = None,
@@ -485,6 +519,9 @@ def main(
         Path to the workbook on disk.
     sheet:
         Name of the worksheet to ingest. Defaults to ``TEACH_RECORD``.
+    workbook_type:
+        Configuration grouping used to select workbook-specific overrides.
+        Defaults to ``"default"``.
     emit_stdout:
         When ``True`` (the default), status messages are printed to stdout/stderr
         to preserve the current CLI behaviour. UI callers can set this to
@@ -514,7 +551,10 @@ def main(
         df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str)
 
     config = _get_table_config(
-        sheet, connection=connection, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        connection=connection,
+        db_settings=db_settings,
     )
     options = config.get("options") or {}
     rename_last_subject = bool(options.get("rename_last_subject"))
@@ -530,7 +570,10 @@ def main(
         _get_sheet_config.cache_clear()
 
     schema = get_schema_details(
-        sheet, connection=connection, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        connection=connection,
+        db_settings=db_settings,
     )
     missing = validate_required_columns(df, schema["required"])
     if missing:

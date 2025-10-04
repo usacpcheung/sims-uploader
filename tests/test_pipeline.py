@@ -82,10 +82,11 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
 
     captured = SimpleNamespace(prep_call=None, mark_call=None)
 
-    def fake_prep_main(workbook, sheet, *, emit_stdout, db_settings):
+    def fake_prep_main(workbook, sheet, *, workbook_type, emit_stdout, db_settings):
         captured.prep_call = {
             "workbook": workbook,
             "sheet": sheet,
+            "workbook_type": workbook_type,
             "emit_stdout": emit_stdout,
             "db_settings": db_settings,
         }
@@ -100,7 +101,7 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     monkeypatch.setattr(
         pipeline.prep_excel,
         "_get_table_config",
-        lambda sheet, db_settings=None: {
+        lambda sheet, workbook_type="default", db_settings=None: {
             "table": "teach_record_raw",
             "normalized_table": "teach_record_normalized",
             "column_mappings": {"姓名": "姓名"},
@@ -149,6 +150,7 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
 
     assert captured.prep_call["emit_stdout"] is False
     assert captured.prep_call["workbook"] == "workbook.xlsx"
+    assert captured.prep_call["workbook_type"] == "default"
     assert inserted["table"] == "teach_record_normalized"
     assert inserted["column_mappings"] == {"姓名": "姓名"}
     assert captured.mark_call["file_hash"] == file_hash
@@ -206,7 +208,7 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
     monkeypatch.setattr(
         pipeline.prep_excel,
         "_get_table_config",
-        lambda sheet, db_settings=None: {
+        lambda sheet, workbook_type="default", db_settings=None: {
             "table": "teach_record_raw",
             "normalized_table": "teach_record_normalized",
             "column_mappings": {"姓名": "姓名"},
@@ -521,7 +523,7 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
     monkeypatch.setattr(
         pipeline.prep_excel,
         "_get_table_config",
-        lambda sheet, db_settings=None: {
+        lambda sheet, workbook_type="default", db_settings=None: {
             "table": "teach_record_raw",
             "normalized_table": "teach_record_normalized",
             "column_mappings": None,
@@ -594,11 +596,14 @@ def test_cli_invokes_pipeline(monkeypatch, capsys):
 
     captured_args = {}
 
-    def fake_run(workbook, sheet, *, source_year, batch_id, db_settings=None):
+    def fake_run(
+        workbook, sheet, *, workbook_type, source_year, batch_id, db_settings=None
+    ):
         captured_args.update(
             {
                 "workbook": workbook,
                 "sheet": sheet,
+                "workbook_type": workbook_type,
                 "source_year": source_year,
                 "batch_id": batch_id,
                 "db_settings": db_settings,
@@ -617,6 +622,7 @@ def test_cli_invokes_pipeline(monkeypatch, capsys):
     assert captured_args == {
         "workbook": "workbook.xlsx",
         "sheet": "SheetA",
+        "workbook_type": "default",
         "source_year": "2024",
         "batch_id": "batch-9",
         "db_settings": None,

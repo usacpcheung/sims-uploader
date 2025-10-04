@@ -126,6 +126,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
     def test_get_schema_details_uses_information_schema(self):
         config_rows = [
             {
+                "workbook_type": "default",
                 "sheet_name": prep_excel.DEFAULT_SHEET,
                 "staging_table": "teach_record_raw",
                 "metadata_columns": json.dumps(
@@ -200,6 +201,69 @@ class PrepExcelSchemaTests(unittest.TestCase):
             schema_connection._cursor.executed[-1][1],
             (prep_excel.DB["database"], "teach_record_raw"),
         )
+
+    def test_get_table_config_supports_multiple_workbook_types(self):
+        rows = [
+            {
+                "workbook_type": "default",
+                "sheet_name": "Shared",
+                "staging_table": "shared_default_raw",
+                "metadata_columns": json.dumps([]),
+                "required_columns": json.dumps([]),
+                "column_mappings": None,
+                "options": None,
+            },
+            {
+                "workbook_type": "alt",
+                "sheet_name": "Shared",
+                "staging_table": "shared_alt_raw",
+                "metadata_columns": json.dumps([]),
+                "required_columns": json.dumps([]),
+                "column_mappings": None,
+                "options": None,
+            },
+        ]
+
+        connection = _FakeConnection(rows)
+
+        config_alt = prep_excel._get_table_config(
+            "Shared", workbook_type="alt", connection=connection
+        )
+        self.assertEqual(config_alt["table"], "shared_alt_raw")
+
+        config_default = prep_excel._get_table_config(
+            "Shared", workbook_type="default", connection=connection
+        )
+        self.assertEqual(config_default["table"], "shared_default_raw")
+
+    def test_get_table_config_falls_back_to_default_workbook_type(self):
+        rows = [
+            {
+                "workbook_type": "default",
+                "sheet_name": "OnlyDefault",
+                "staging_table": "default_raw",
+                "metadata_columns": json.dumps([]),
+                "required_columns": json.dumps([]),
+                "column_mappings": None,
+                "options": None,
+            }
+        ]
+
+        connection = _FakeConnection(rows)
+
+        config = prep_excel._get_table_config(
+            "OnlyDefault", workbook_type="custom", connection=connection
+        )
+        self.assertEqual(config["table"], "default_raw")
+
+    def test_get_table_config_raises_for_unknown_workbook_type(self):
+        rows = []
+        connection = _FakeConnection(rows)
+
+        with self.assertRaisesRegex(ValueError, "Unsupported workbook type"):
+            prep_excel._get_table_config(
+                "Missing", workbook_type="nonexistent", connection=connection
+            )
 
     def test_get_schema_details_missing_sheet_raises(self):
         config_rows = [
@@ -902,10 +966,16 @@ class PrepExcelSchemaTests(unittest.TestCase):
             os.remove(excel_path)
 
         mock_get_table_config.assert_called_once_with(
-            prep_excel.DEFAULT_SHEET, connection=connection, db_settings=None
+            prep_excel.DEFAULT_SHEET,
+            workbook_type="default",
+            connection=connection,
+            db_settings=None,
         )
         mock_get_schema_details.assert_called_once_with(
-            prep_excel.DEFAULT_SHEET, connection=connection, db_settings=None
+            prep_excel.DEFAULT_SHEET,
+            workbook_type="default",
+            connection=connection,
+            db_settings=None,
         )
         self.assertTrue(mock_hash_exists.called)
         _, hash_kwargs = mock_hash_exists.call_args

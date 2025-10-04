@@ -71,6 +71,11 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--batch-id",
         help="Optional batch identifier to associate with the upload",
     )
+    parser.add_argument(
+        "--workbook-type",
+        default="default",
+        help="Workbook type used to select configuration overrides (default: %(default)s)",
+    )
     return parser.parse_args(argv)
 
 
@@ -105,6 +110,7 @@ def load_csv_into_staging(
     csv_path: str,
     *,
     sheet: str,
+    workbook_type: str = "default",
     source_year: str,
     file_hash: str,
     batch_id: str | None = None,
@@ -113,11 +119,15 @@ def load_csv_into_staging(
     """Load a prepared CSV file into the staging table and return metadata."""
 
     config = prep_excel._get_table_config(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     table_name = config["table"]
     schema = prep_excel.get_schema_details(
-        sheet, db_settings=db_settings
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
     )
     ordered_columns = schema["order"]
 
@@ -214,6 +224,7 @@ def main(
     workbook_path: str,
     sheet: str = prep_excel.DEFAULT_SHEET,
     *,
+    workbook_type: str = "default",
     source_year: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
@@ -224,6 +235,7 @@ def main(
     csv_path, file_hash = prep_excel.main(
         workbook_path,
         sheet,
+        workbook_type=workbook_type,
         emit_stdout=False,
         db_settings=db_settings,
     )
@@ -235,6 +247,7 @@ def main(
     result = load_csv_into_staging(
         csv_path,
         sheet=sheet,
+        workbook_type=workbook_type,
         source_year=source_year,
         file_hash=file_hash,
         batch_id=batch_id,
@@ -256,6 +269,7 @@ def cli(argv: Iterable[str] | None = None) -> None:
     main(
         args.workbook,
         args.sheet,
+        workbook_type=args.workbook_type,
         source_year=args.source_year,
         batch_id=args.batch_id,
     )
