@@ -117,9 +117,9 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    ### Deduplication workflow
 
-   - Each staging table should declare a unique index on `file_hash` (see `sql/teach_record_raw.sql` for an example `UNIQUE KEY`).
-   - `app.prep_excel.main` hashes the original workbook before writing CSV output. If the hash already exists in the destination staging table, the script skips CSV generation and logs a warning to `stderr` so automated callers can gracefully short-circuit their pipelines.
-   - UI consumers should treat a duplicate submission as a no-op: surface a “file already uploaded” notice to the user, keep the previous ingestion metadata untouched, and avoid queuing a second `LOAD DATA INFILE` job.
+  - Each staging table should index `file_hash` for quick lookups (see `sql/teach_record_raw.sql` for the canonical non-unique `KEY`). Do **not** enforce uniqueness at the database level because the loader writes the same hash to every row from a workbook.
+  - `app.prep_excel.main` hashes the original workbook before writing CSV output. If the hash already exists in the destination staging table, the script skips CSV generation and logs a warning to `stderr` so automated callers can gracefully short-circuit their pipelines. Keep this guard enabled to prevent duplicate uploads.
+  - UI consumers should treat a duplicate submission as a no-op: surface a “file already uploaded” notice to the user, keep the previous ingestion metadata untouched, and avoid queuing a second `LOAD DATA INFILE` job.
 
    When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading. Programmatic integrations can call `app.prep_excel.main(..., emit_stdout=False)` to suppress those prints while still receiving the `(csv_path, file_hash)` tuple. Services that own their database pooling can also provide `connection=` (or pass alternative `db_settings=`) so the preprocessor reuses existing credentials instead of opening new connections for each helper call.
 
