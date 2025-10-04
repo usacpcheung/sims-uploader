@@ -1394,5 +1394,51 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertGreaterEqual(connection.commits, 1)
 
 
+class PrepExcelMainTests(unittest.TestCase):
+    def setUp(self):
+        prep_excel._get_sheet_config.cache_clear()
+
+    def tearDown(self):
+        prep_excel._get_sheet_config.cache_clear()
+
+    def test_main_sanitizes_extra_columns(self):
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "任教老師": ["Teacher"],
+                "教學跟進/回饋": ["Feedback"],
+                "2023 Amount": ["10"],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path = os.path.join(tmpdir, "input.xlsx")
+            with open(xlsx_path, "wb") as handle:
+                handle.write(b"dummy")
+
+            with mock.patch.object(
+                prep_excel.pd, "read_excel", return_value=df
+            ), mock.patch.object(
+                prep_excel, "_get_table_config", return_value={"table": "teach_record_raw", "options": {}},
+            ), mock.patch.object(
+                prep_excel,
+                "get_schema_details",
+                return_value={"order": ["日期", "任教老師"], "required": ["日期"]},
+            ), mock.patch.object(
+                prep_excel, "_staging_file_hash_exists", return_value=False
+            ):
+                csv_path, file_hash = prep_excel.main(
+                    xlsx_path, emit_stdout=False
+                )
+
+            self.assertIsNotNone(csv_path)
+            self.assertIsNotNone(file_hash)
+
+            with open(csv_path, encoding="utf-8") as csv_file:
+                header_line = csv_file.readline().strip()
+
+        self.assertEqual(header_line, "日期,任教老師,教學跟進_回饋,_2023_amount")
+
+
 if __name__ == "__main__":
     unittest.main()

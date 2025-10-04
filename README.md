@@ -109,6 +109,10 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    The `required_columns` JSON array lets you explicitly state which business headers must be present for a given workbook type. Any other non-metadata columns can be treated as optional (for example, year-specific additions). The `options` JSON column toggles sheet-specific behaviours. For example, `rename_last_subject` controls whether unnamed trailing columns are renamed to “教授科目” and other blank unnamed columns are dropped—behaviour that only the prototype teaching-record sheet currently needs. Disable it by setting the flag to `FALSE` when registering other templates.
 
+   Optional headers are automatically sanitized with a Unicode-aware rule that keeps Chinese (and other non-Latin) characters intact, replacing punctuation or whitespace with underscores and deduplicating repeated names. This ensures year-specific columns such as “教學跟進/回饋” become stable identifiers like “教學跟進_回饋” without losing their meaning.
+
+   Narrative columns such as “自定教學重點”, “備註”, and “教學跟進/回饋” are provisioned as `TEXT` so that multi-paragraph feedback is not truncated during `LOAD DATA`. Run `SOURCE sql/migrations/20241009_extend_teach_record_text.sql;` against existing environments before loading workbooks that rely on the wider fields.
+
    To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config` with an appropriate `workbook_type`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
 
    ### Deduplication workflow
@@ -133,9 +137,9 @@ The `.env` file is loaded automatically by all ingestion tools via `app.config`,
 
    > **Note:** MariaDB/MySQL must allow local file loads. Set
    > `local_infile=1` on the server (e.g. in `mysqld.cnf`) and ensure clients
-   > enable the same flag. The CLI passes `local_infile=True` (with the
-   > accompanying client flag) automatically; if you connect through other
-   > tools, remember to enable the option there as well.
+   > enable it too (`local_infile=1`). The CLI passes the appropriate
+   > PyMySQL flags automatically; if you connect through other tools, remember
+   > to enable the same option.
 
 ---
 

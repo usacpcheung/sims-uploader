@@ -24,6 +24,7 @@ from pymysql.constants import ER
 
 from app.config import get_db_settings
 from app import prep_excel
+from app.identifiers import sanitize_identifier
 
 LOGGER = logging.getLogger(__name__)
 
@@ -106,8 +107,13 @@ def _get_db_settings(overrides: Mapping[str, object] | None = None) -> dict[str,
     return settings
 
 
-def load_csv_into_staging(
-    csv_path: str,
+def _quote_identifier(identifier: str) -> str:
+    return "`" + identifier.replace("`", "``") + "`"
+
+
+def main(
+    workbook_path: str,
+    sheet: str = prep_excel.DEFAULT_SHEET,
     *,
     sheet: str,
     workbook_type: str = "default",
@@ -131,24 +137,17 @@ def load_csv_into_staging(
     )
     ordered_columns = schema["order"]
 
-    header, has_data_rows = _read_csv_header(csv_path)
-    if header != ordered_columns:
-        raise ValueError(
-            "CSV header does not match expected column order"
-            f" for table {table_name}: {header!r} != {ordered_columns!r}"
-        )
-    if not has_data_rows:
-        raise ValueError("CSV contains no data rows to load")
-
-    column_list = ", ".join(f"`{column}`" for column in ordered_columns)
-    load_sql = (
-        f"LOAD DATA LOCAL INFILE %s INTO TABLE `{table_name}` "
-        "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
-        "LINES TERMINATED BY '\n' IGNORE 1 LINES "
-        f"({column_list}) "
-        "SET file_hash = %s, batch_id = %s, "
-        "source_year = %s, ingested_at = %s"
-    )
+    header = _read_csv_header(csv_path)
+    existing_identifiers = set(ordered_columns)
+    sanitized_header: list[str] = []
+    header_mapping: dict[str, str] = {}
+    for column in header:
+        if column in existing_identifiers:
+            sanitized_header.append(column)
+            continue
+        sanitized = sanitize_identifier(column, existing=existing_identifiers)
+        sanitized_header.append(sanitized)
+        header_mapping[column] = sanitized
 
     if batch_id is None:
         batch_id = str(uuid.uuid4())
@@ -156,6 +155,54 @@ def load_csv_into_staging(
     settings = _get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
     try:
+        if header_mapping:
+            with connection.cursor() as cursor:
+                for original, sanitized in header_mapping.items():
+                    if sanitized in ordered_columns:
+                        continue
+                    LOGGER.info(
+                        "Adding staging column %s for header %s", sanitized, original
+                    )
+                    cursor.execute(
+                        f"ALTER TABLE {_quote_identifier(table_name)} "
+                        f"ADD COLUMN {_quote_identifier(sanitized)} TEXT NULL"
+                    )
+            connection.commit()
+
+        schema = prep_excel.get_schema_details(
+            sheet, connection=connection, db_settings=db_settings
+        )
+        ordered_columns = schema["order"]
+        required_columns = schema["required"]
+
+        missing_required = [
+            column for column in required_columns if column not in sanitized_header
+        ]
+        if missing_required:
+            raise ValueError(
+                "CSV missing required column(s) after sanitization: "
+                + ", ".join(missing_required)
+            )
+
+        unknown_columns = [
+            column for column in sanitized_header if column not in ordered_columns
+        ]
+        if unknown_columns:
+            raise ValueError(
+                "CSV contains column(s) not present in staging schema: "
+                + ", ".join(unknown_columns)
+            )
+
+        column_list = ", ".join(_quote_identifier(column) for column in sanitized_header)
+        load_sql = (
+            f"LOAD DATA LOCAL INFILE %s INTO TABLE {_quote_identifier(table_name)} "
+            "FIELDS TERMINATED BY ',' ENCLOSED BY '\"' "
+            "LINES TERMINATED BY '\n' IGNORE 1 LINES "
+            f"({column_list}) "
+            "SET file_hash = %s, batch_id = COALESCE(%s, UUID()), "
+            "source_year = %s, ingested_at = %s"
+        )
+
         ingested_at = datetime.now(timezone.utc)
         connection.begin()
         try:

@@ -14,10 +14,12 @@ import pymysql
 
 try:
     from .config import get_db_settings
+    from .identifiers import sanitize_identifier
 except ImportError:  # pragma: no cover - fallback when executed as a script
     # Ensure the repository root is on sys.path when running ``python app/prep_excel.py``.
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from app.config import get_db_settings
+    from app.identifiers import sanitize_identifier
 
 DB = get_db_settings()
 
@@ -788,6 +790,14 @@ def main(
     # any additional headers by appending them after the schema-aligned block.
     order = schema["order"]
     extra_columns = [c for c in df.columns if c not in order]
+    if extra_columns:
+        existing_identifiers = set(order)
+        sanitized_mapping: dict[str, str] = {}
+        for column in extra_columns:
+            sanitized = sanitize_identifier(column, existing=existing_identifiers)
+            sanitized_mapping[column] = sanitized
+        df = df.rename(columns=sanitized_mapping)
+        extra_columns = [sanitized_mapping[column] for column in extra_columns]
     for c in order:
         if c not in df.columns:
             df[c] = None

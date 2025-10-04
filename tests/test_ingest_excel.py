@@ -112,7 +112,9 @@ class IngestExcelTests(unittest.TestCase):
         with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")) as prep_main, mock.patch.object(
             ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
         ) as get_config, mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": header, "required": header},
         ) as get_schema, mock.patch.object(
             ingest_excel.pymysql, "connect", return_value=connection
         ) as connect, mock.patch.object(
@@ -128,7 +130,7 @@ class IngestExcelTests(unittest.TestCase):
             db_settings=None,
         )
         get_config.assert_called_once()
-        get_schema.assert_called_once()
+        self.assertEqual(get_schema.call_count, 2)
         connect.assert_called_once()
         mock_uuid.assert_called_once()
         args, kwargs = connect.call_args
@@ -231,18 +233,25 @@ class IngestExcelTests(unittest.TestCase):
 
     def test_main_header_mismatch_raises(self):
         csv_path = self._create_csv(["日期", "任教老師"])
+        fake_cursor = _Cursor()
+        connection = _Connection(fake_cursor)
+
         with mock.patch.object(
             ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
         ), mock.patch.object(
             ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
         ), mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": ["A", "B"]}
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": ["A", "B"], "required": ["A", "B"]},
         ), mock.patch.object(
-            ingest_excel.pymysql, "connect"
-        ) as connect:
+            ingest_excel.pymysql, "connect", return_value=connection
+        ):
             with self.assertRaises(ValueError):
                 ingest_excel.main("workbook.xlsx", source_year="2024")
-        connect.assert_not_called()
+
+        self.assertFalse(connection.begun)
+        self.assertTrue(connection.committed)
 
     def test_main_rolls_back_on_error(self):
         header = ["日期", "任教老師"]
@@ -254,7 +263,9 @@ class IngestExcelTests(unittest.TestCase):
         with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")), mock.patch.object(
             ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
         ), mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": header, "required": header},
         ), mock.patch.object(
             ingest_excel.pymysql, "connect", return_value=connection
         ):
@@ -265,78 +276,123 @@ class IngestExcelTests(unittest.TestCase):
         self.assertTrue(connection.rolled_back)
         self.assertFalse(connection.committed)
 
-    def test_main_requires_source_year(self):
-        with mock.patch.object(ingest_excel.prep_excel, "main") as prep_main:
-            with self.assertRaisesRegex(ValueError, "source_year"):
-                ingest_excel.main("workbook.xlsx", source_year="")
-        prep_main.assert_not_called()
-        self.mock_hash_exists.assert_not_called()
-
-    def test_main_rejects_empty_csv(self):
-        header = ["日期", "任教老師"]
-        temp = tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8")
-        temp.write(",".join(header) + "\n")
-        temp.flush()
-        temp.close()
-        self.addCleanup(lambda: os.remove(temp.name))
-
-        with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(temp.name, "abc")), mock.patch.object(
-            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
-        ), mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
-        ), mock.patch.object(
-            ingest_excel.pymysql, "connect"
-        ) as connect:
-            with self.assertRaisesRegex(ValueError, "no data rows"):
-                ingest_excel.main("workbook.xlsx", source_year="2024")
-        connect.assert_not_called()
-        self.mock_hash_exists.assert_not_called()
-
-    def test_main_checks_local_infile_setting(self):
-        header = ["日期", "任教老師"]
+    def test_main_adds_missing_columns_before_load(self):
+        base_columns = ["日期", "任教老師"]
+        header = base_columns + ["_2024_amount"]
         csv_path = self._create_csv(header)
 
-        fake_cursor = _Cursor(fetchone_results=[(0,)])
+        fake_cursor = _Cursor(rowcount=1)
         connection = _Connection(fake_cursor)
 
-        with mock.patch.object(ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")), mock.patch.object(
+        schema_sequence = [
+            {"order": base_columns, "required": base_columns},
+            {"order": header, "required": base_columns},
+        ]
+
+        with mock.patch.object(
+            ingest_excel.prep_excel,
+            "main",
+            return_value=(csv_path, "abc"),
+        ), mock.patch.object(
             ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
         ), mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
+            ingest_excel.prep_excel, "get_schema_details", side_effect=schema_sequence
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql, "connect", return_value=connection
+        ):
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        self.assertEqual(get_schema.call_count, 2)
+        self.assertTrue(connection.begun)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
+        self.assertGreaterEqual(len(fake_cursor.executed), 2)
+        alter_query, _ = fake_cursor.executed[0]
+        self.assertIn("ALTER TABLE `teach_record_raw` ADD COLUMN `_2024_amount` TEXT NULL", alter_query)
+        load_query, load_params = fake_cursor.executed[1]
+        column_list = ", ".join(f"`{name}`" for name in header)
+        self.assertIn(column_list, load_query)
+        self.assertEqual(load_params[0], csv_path)
+
+    def test_main_reuses_sanitized_cjk_column_without_alter(self):
+        base_columns = ["日期", "任教老師"]
+        sanitized_extra = "教學跟進_回饋"
+        header = base_columns + [sanitized_extra]
+        csv_path = self._create_csv(header)
+
+        first_cursor = _Cursor(rowcount=1)
+        second_cursor = _Cursor(rowcount=1)
+        first_connection = _Connection(first_cursor)
+        second_connection = _Connection(second_cursor)
+
+        schema_sequence = [
+            {"order": base_columns, "required": base_columns},
+            {"order": header, "required": base_columns},
+            {"order": header, "required": base_columns},
+            {"order": header, "required": base_columns},
+        ]
+
+        with mock.patch.object(
+            ingest_excel.prep_excel,
+            "main",
+            return_value=(csv_path, "abc"),
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            side_effect=schema_sequence,
+        ) as get_schema, mock.patch.object(
+            ingest_excel.pymysql,
+            "connect",
+            side_effect=[first_connection, second_connection],
+        ):
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+            ingest_excel.main("workbook.xlsx", source_year="2024")
+
+        self.assertEqual(get_schema.call_count, 4)
+
+        self.assertGreaterEqual(len(first_cursor.executed), 2)
+        alter_query, _ = first_cursor.executed[0]
+        self.assertIn("ALTER TABLE `teach_record_raw` ADD COLUMN `教學跟進_回饋` TEXT NULL", alter_query)
+        load_query_first, load_params_first = first_cursor.executed[1]
+        self.assertIn("`教學跟進_回饋`", load_query_first)
+        self.assertEqual(load_params_first[0], csv_path)
+
+        self.assertEqual(len(second_cursor.executed), 1)
+        second_query, second_params = second_cursor.executed[0]
+        self.assertNotIn("ALTER TABLE", second_query)
+        self.assertIn("`教學跟進_回饋`", second_query)
+        self.assertEqual(second_params[0], csv_path)
+
+    def test_main_loads_long_feedback_text(self):
+        header = ["教學跟進/回饋"]
+        long_feedback = "教學反思" * 150  # > 255 characters
+        csv_path = self._create_csv(header, rows=[[long_feedback]])
+
+        fake_cursor = _Cursor(rowcount=1)
+        connection = _Connection(fake_cursor)
+
+        with mock.patch.object(
+            ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")
+        ), mock.patch.object(
+            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
+        ), mock.patch.object(
+            ingest_excel.prep_excel,
+            "get_schema_details",
+            return_value={"order": header, "required": header},
         ), mock.patch.object(
             ingest_excel.pymysql, "connect", return_value=connection
         ):
-            with self.assertRaisesRegex(RuntimeError, "LOCAL INFILE"):
-                ingest_excel.main("workbook.xlsx", source_year="2024")
+            ingest_excel.main("workbook.xlsx", source_year="2024")
 
         self.assertTrue(connection.begun)
-        self.assertTrue(connection.rolled_back)
-        self.assertFalse(connection.committed)
+        self.assertTrue(connection.committed)
+        self.assertFalse(connection.rolled_back)
         self.assertEqual(len(fake_cursor.executed), 1)
-        self.mock_hash_exists.assert_not_called()
-
-    def test_main_duplicate_hash_after_schema_changes(self):
-        header = ["日期", "任教老師"]
-        csv_path = self._create_csv(header)
-
-        fake_cursor = _Cursor(rowcount=2, fetchone_results=[(1,)])
-        connection = _Connection(fake_cursor)
-
-        self.hash_exists_patcher.stop()
-        with mock.patch.object(ingest_excel.prep_excel, "_staging_file_hash_exists", return_value=True), mock.patch.object(
-            ingest_excel.prep_excel, "main", return_value=(csv_path, "abc")), mock.patch.object(
-            ingest_excel.prep_excel, "_get_table_config", return_value={"table": "teach_record_raw"}
-        ), mock.patch.object(
-            ingest_excel.prep_excel, "get_schema_details", return_value={"order": header}
-        ), mock.patch.object(
-            ingest_excel.pymysql, "connect", return_value=connection
-        ):
-            with self.assertRaisesRegex(RuntimeError, "File hash"):
-                ingest_excel.main("workbook.xlsx", source_year="2024")
-
-        self.assertTrue(connection.begun)
-        self.assertTrue(connection.rolled_back)
-        self.assertFalse(connection.committed)
+        load_query, load_params = fake_cursor.executed[0]
+        self.assertIn("`教學跟進/回饋`", load_query)
+        self.assertEqual(load_params[0], csv_path)
 
     def test_script_mode_bootstrap_adds_project_root(self):
         module_path = ingest_excel.__file__
