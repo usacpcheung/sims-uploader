@@ -111,11 +111,10 @@ def _quote_identifier(identifier: str) -> str:
     return "`" + identifier.replace("`", "``") + "`"
 
 
-def main(
-    workbook_path: str,
-    sheet: str = prep_excel.DEFAULT_SHEET,
+def load_csv_into_staging(
+    csv_path: str,
     *,
-    sheet: str,
+    sheet: str = prep_excel.DEFAULT_SHEET,
     workbook_type: str = "default",
     source_year: str,
     file_hash: str,
