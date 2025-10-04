@@ -49,6 +49,11 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--batch-id",
         help="Optional batch identifier to associate with the upload",
     )
+    parser.add_argument(
+        "--workbook-type",
+        default="default",
+        help="Workbook type used to select configuration overrides (default: %(default)s)",
+    )
     return parser.parse_args(argv)
 
 
@@ -68,6 +73,7 @@ def run_pipeline(
     workbook_path: str,
     sheet: str = prep_excel.DEFAULT_SHEET,
     *,
+    workbook_type: str = "default",
     source_year: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
@@ -75,6 +81,7 @@ def run_pipeline(
     csv_path, file_hash = prep_excel.main(
         workbook_path,
         sheet,
+        workbook_type=workbook_type,
         emit_stdout=False,
         db_settings=db_settings,
     )
@@ -98,13 +105,18 @@ def run_pipeline(
     staging_result = ingest_excel.load_csv_into_staging(
         csv_path,
         sheet=sheet,
+        workbook_type=workbook_type,
         source_year=source_year,
         file_hash=file_hash,
         batch_id=batch_id,
         db_settings=db_settings,
     )
 
-    table_config = prep_excel._get_table_config(sheet, db_settings=db_settings)
+    table_config = prep_excel._get_table_config(
+        sheet,
+        workbook_type=workbook_type,
+        db_settings=db_settings,
+    )
     staging_table = table_config["table"]
     normalized_table = table_config.get("normalized_table")
     if not normalized_table:
@@ -115,16 +127,27 @@ def run_pipeline(
     if not column_mappings:
         column_mappings = None
     column_types = table_config.get("column_types") or {}
+    metadata_columns = table_config.get("normalized_metadata_columns")
+    reserved_source_columns = table_config.get("reserved_source_columns")
+    column_type_overrides = table_config.get("normalized_column_type_overrides")
 
     settings = ingest_excel._get_db_settings(db_settings)
     connection = pymysql.connect(**settings)
     try:
         staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
         resolved_mappings = normalize_staging.resolve_column_mappings(
-            staging_rows, column_mappings
+            staging_rows,
+            column_mappings,
+            metadata_columns=metadata_columns,
+            reserved_source_columns=reserved_source_columns,
         )
         normalize_staging.ensure_normalized_schema(
-            connection, normalized_table, resolved_mappings, column_types
+            connection,
+            normalized_table,
+            resolved_mappings,
+            column_types,
+            metadata_columns=metadata_columns,
+            column_type_overrides=column_type_overrides,
         )
 
         connection.begin()
@@ -133,6 +156,8 @@ def run_pipeline(
             normalized_table,
             staging_rows,
             resolved_mappings,
+            metadata_columns=metadata_columns,
+            reserved_source_columns=reserved_source_columns,
         )
         processed_at = normalize_staging.mark_staging_rows_processed(
             connection,
@@ -165,6 +190,7 @@ def cli(argv: Iterable[str] | None = None) -> PipelineResult:
         result = run_pipeline(
             args.workbook,
             args.sheet,
+            workbook_type=args.workbook_type,
             source_year=args.source_year,
             batch_id=args.batch_id,
         )

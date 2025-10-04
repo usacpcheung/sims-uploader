@@ -121,7 +121,11 @@ class IngestExcelTests(unittest.TestCase):
             ingest_excel.main("workbook.xlsx", source_year="2024")
 
         prep_main.assert_called_once_with(
-            "workbook.xlsx", ingest_excel.prep_excel.DEFAULT_SHEET, emit_stdout=False, db_settings=None
+            "workbook.xlsx",
+            ingest_excel.prep_excel.DEFAULT_SHEET,
+            workbook_type="default",
+            emit_stdout=False,
+            db_settings=None,
         )
         get_config.assert_called_once()
         get_schema.assert_called_once()
