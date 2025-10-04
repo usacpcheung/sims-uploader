@@ -5,9 +5,16 @@ from decimal import Decimal
 
 import pytest
 
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_USER", "user")
+os.environ.setdefault("DB_PASSWORD", "password")
+os.environ.setdefault("DB_NAME", "database")
+os.environ.setdefault("DB_CHARSET", "utf8mb4")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app import normalize_staging
+from app.prep_excel import TableMissingError
 
 
 class _Cursor:
@@ -187,6 +194,38 @@ def test_ensure_normalized_schema_alters_missing_columns(monkeypatch, column_map
     assert cursor.execute_calls
     alter_statements = [sql for sql, _ in cursor.execute_calls if sql.startswith("ALTER TABLE")]
     assert alter_statements
+
+
+def test_ensure_normalized_schema_creates_table_when_missing(
+    monkeypatch, column_mappings
+):
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    def _missing(*_, **__):
+        raise TableMissingError("teach_record_normalized")
+
+    monkeypatch.setattr(normalize_staging, "_fetch_existing_columns", _missing)
+
+    changed = normalize_staging.ensure_normalized_schema(
+        connection,
+        "teach_record_normalized",
+        column_mappings,
+        {"教學跟進/回饋": "TEXT NULL"},
+    )
+
+    assert changed is True
+    create_statements = [
+        sql for sql, _ in cursor.execute_calls if sql.startswith("CREATE TABLE")
+    ]
+    assert len(create_statements) == 1
+    create_sql = create_statements[0]
+    assert "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY" in create_sql
+    assert "`raw_id` BIGINT UNSIGNED NOT NULL" in create_sql
+    assert "`file_hash` CHAR(64) NOT NULL" in create_sql
+    assert "`ingested_at` DATETIME NOT NULL" in create_sql
+    assert "`上課時數` DECIMAL(6,2) NULL" in create_sql
+    assert "`教學跟進/回饋` TEXT NULL" in create_sql
 
 
 def test_ensure_normalized_schema_uses_column_type_overrides(monkeypatch):
