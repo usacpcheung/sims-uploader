@@ -4,6 +4,7 @@ import re
 import sys
 import hashlib
 import warnings
+from collections import OrderedDict
 
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence
@@ -37,6 +38,110 @@ class MissingColumnsError(RuntimeError):
         else:
             message = "Missing required column(s)."
         super().__init__(message)
+
+
+class TableMissingError(RuntimeError):
+    """Raised when a staging table is missing from the database."""
+
+    def __init__(self, table_name: str):
+        super().__init__(f"Table does not exist: {table_name}")
+        self.table_name = table_name
+
+
+def _default_metadata_column_definitions() -> "OrderedDict[str, str]":
+    """Return the default column definitions for staging table metadata."""
+
+    return OrderedDict(
+        (
+            ("id", "BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY"),
+            ("file_hash", "CHAR(64) NOT NULL"),
+            ("batch_id", "CHAR(36) NULL"),
+            ("source_year", "INT NULL"),
+            ("ingested_at", "DATETIME NOT NULL"),
+            ("processed_at", "DATETIME NULL DEFAULT NULL"),
+        )
+    )
+
+
+def _resolve_column_type(
+    column_name: str,
+    *,
+    column_types: Mapping[str, str],
+    metadata_defaults: Mapping[str, str],
+) -> str:
+    override = column_types.get(column_name)
+    if override is not None:
+        override = str(override).strip()
+        if override:
+            return override
+    return metadata_defaults.get(column_name, "VARCHAR(255) NULL")
+
+
+def _build_create_table_statement(
+    table_name: str,
+    *,
+    metadata_columns: Iterable[str],
+    metadata_order: Iterable[str],
+    required_columns: Iterable[str],
+    column_types: Mapping[str, str],
+) -> str:
+    metadata_defaults = _default_metadata_column_definitions()
+    metadata_columns_set = set(metadata_columns)
+
+    if metadata_columns_set:
+        ordered_metadata = [
+            column
+            for column in metadata_order
+            if column in metadata_columns_set
+        ]
+        # Ensure default ordering for known metadata columns that were not
+        # explicitly included in the configuration order.
+        ordered_metadata.extend(
+            column
+            for column in metadata_defaults
+            if column in metadata_columns_set and column not in ordered_metadata
+        )
+        ordered_metadata.extend(
+            column
+            for column in metadata_columns_set
+            if column not in ordered_metadata
+        )
+    else:
+        ordered_metadata = list(metadata_defaults.keys())
+
+    required_order = list(required_columns)
+    if not required_order:
+        required_order = []
+
+    added: set[str] = set()
+    column_defs: list[str] = []
+
+    def append_column(name: str) -> None:
+        if name in added:
+            return
+        column_defs.append(
+            f"{_quote_identifier(name)} "
+            f"{_resolve_column_type(name, column_types=column_types, metadata_defaults=metadata_defaults)}"
+        )
+        added.add(name)
+
+    for name in ordered_metadata:
+        append_column(name)
+
+    for name in required_order:
+        append_column(name)
+
+    for name in column_types:
+        append_column(name)
+
+    if not column_defs:
+        append_column("id")
+
+    columns_sql = ",\n  ".join(column_defs)
+    return (
+        f"CREATE TABLE {_quote_identifier(table_name)} (\n  {columns_sql}\n) "
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+    )
 
 
 def _series_has_data(series: pd.Series) -> bool:
@@ -161,6 +266,9 @@ def _parse_sheet_config_rows(
                 normalized_table = option_value
                 normalized_table_source = "explicit"
         column_types: dict[str, str] = {}
+        normalized_metadata_columns: tuple[str, ...] | None = None
+        reserved_source_columns: frozenset[str] | None = None
+        normalized_column_type_overrides: dict[str, str] | None = None
         if isinstance(options, Mapping):
             raw_column_types = options.get("column_types")
             if isinstance(raw_column_types, Mapping):
@@ -174,6 +282,50 @@ def _parse_sheet_config_rows(
                     if not type_text:
                         continue
                     column_types[key_text] = type_text
+
+            raw_metadata_columns = options.get("normalized_metadata_columns")
+            if isinstance(raw_metadata_columns, (list, tuple, set)):
+                cleaned_metadata: list[str] = []
+                seen_metadata: set[str] = set()
+                for value in raw_metadata_columns:
+                    text = str(value).strip()
+                    if not text or text in seen_metadata:
+                        continue
+                    seen_metadata.add(text)
+                    cleaned_metadata.append(text)
+                if cleaned_metadata:
+                    normalized_metadata_columns = tuple(cleaned_metadata)
+
+            raw_reserved_columns = options.get("reserved_source_columns")
+            if isinstance(raw_reserved_columns, (list, tuple, set)):
+                cleaned_reserved: list[str] = []
+                seen_reserved: set[str] = set()
+                for value in raw_reserved_columns:
+                    text = str(value).strip()
+                    if not text or text in seen_reserved:
+                        continue
+                    seen_reserved.add(text)
+                    cleaned_reserved.append(text)
+                if cleaned_reserved:
+                    reserved_source_columns = frozenset(cleaned_reserved)
+
+            raw_normalized_overrides = options.get(
+                "normalized_column_type_overrides"
+            )
+            if isinstance(raw_normalized_overrides, Mapping):
+                cleaned_overrides: dict[str, str] = {}
+                for key, value in raw_normalized_overrides.items():
+                    key_text = str(key).strip()
+                    if not key_text:
+                        continue
+                    if value is None:
+                        continue
+                    type_text = str(value).strip()
+                    if not type_text:
+                        continue
+                    cleaned_overrides[key_text] = type_text
+                if cleaned_overrides:
+                    normalized_column_type_overrides = cleaned_overrides
         if normalized_table is None:
             staging_table = row.get("staging_table")
             if isinstance(staging_table, str):
@@ -196,11 +348,16 @@ def _parse_sheet_config_rows(
         workbook_config[sheet_name] = {
             "table": row["staging_table"],
             "metadata_columns": frozenset(metadata_columns),
+            "metadata_column_order": tuple(metadata_columns),
             "required_columns": frozenset(required_columns),
+            "required_column_order": tuple(required_columns),
             "options": options,
             "column_mappings": column_mappings,
             "normalized_table": normalized_table,
             "column_types": column_types,
+            "normalized_metadata_columns": normalized_metadata_columns,
+            "reserved_source_columns": reserved_source_columns,
+            "normalized_column_type_overrides": normalized_column_type_overrides,
         }
         normalized_sources[key] = normalized_table_source
     return config
@@ -325,6 +482,10 @@ def _fetch_table_columns(
                 (db_settings_for_query["database"], table_name),
             )
             rows = cur.fetchall()
+    except pymysql.err.ProgrammingError as exc:  # type: ignore[attr-defined]
+        if exc.args and exc.args[0] == 1146:
+            raise TableMissingError(table_name) from exc
+        raise
     finally:
         if owns_connection:
             connection.close()
@@ -353,23 +514,60 @@ def _ensure_staging_columns(
 ) -> bool:
     table_name = config["table"]
     metadata_columns = set(config.get("metadata_columns", ()))
+    metadata_column_order = tuple(config.get("metadata_column_order", ()))
     column_types: Mapping[str, str] = config.get("column_types") or {}
+    required_column_order = tuple(config.get("required_column_order", ()))
+    if not required_column_order and config.get("required_columns"):
+        required_column_order = tuple(sorted(config.get("required_columns", ())))
+
+    metadata_defaults = _default_metadata_column_definitions()
 
     owns_connection = connection is None
     if owns_connection:
         settings = _normalise_db_settings(db_settings)
         connection = pymysql.connect(**settings)
 
+    schema_changed = False
+
     try:
-        column_details = {
-            column["name"]: column
-            for column in _fetch_table_columns(
+        try:
+            columns = _fetch_table_columns(
                 table_name, connection=connection, db_settings=db_settings
             )
-        }
+        except TableMissingError:
+            create_sql = _build_create_table_statement(
+                table_name,
+                metadata_columns=metadata_columns,
+                metadata_order=metadata_column_order,
+                required_columns=required_column_order,
+                column_types=column_types,
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(create_sql)
+            connection.commit()
+            schema_changed = True
+            columns = _fetch_table_columns(
+                table_name, connection=connection, db_settings=db_settings
+            )
+
+        column_details = {column["name"]: column for column in columns}
 
         missing_columns: list[tuple[str, str]] = []
         modify_columns: list[tuple[str, str]] = []
+        metadata_targets = (
+            metadata_columns if metadata_columns else set(metadata_defaults.keys())
+        )
+
+        for column_name in metadata_targets:
+            if column_name in column_details:
+                continue
+            column_type_sql = _resolve_column_type(
+                column_name,
+                column_types=column_types,
+                metadata_defaults=metadata_defaults,
+            )
+            missing_columns.append((column_name, column_type_sql))
+
         seen: set[str] = set()
         for header in headers:
             if header in seen:
@@ -401,7 +599,7 @@ def _ensure_staging_columns(
             missing_columns.append((header, column_type_sql))
 
         if not missing_columns and not modify_columns:
-            return False
+            return schema_changed
 
         with connection.cursor() as cursor:
             for column, column_type in missing_columns:
@@ -414,6 +612,8 @@ def _ensure_staging_columns(
                 )
         connection.commit()
         return True
+    except TableMissingError:
+        raise
     finally:
         if owns_connection and connection is not None:
             connection.close()
@@ -434,9 +634,14 @@ def get_schema_details(
     )
     metadata_columns = set(config.get("metadata_columns", ()))
     required_columns_config = set(config.get("required_columns", ()))
-    columns = _fetch_table_columns(
-        config["table"], connection=connection, db_settings=db_settings
-    )
+    try:
+        columns = _fetch_table_columns(
+            config["table"], connection=connection, db_settings=db_settings
+        )
+    except TableMissingError as exc:
+        raise RuntimeError(
+            f"Staging table {config['table']!r} is missing; run prep_excel.main first."
+        ) from exc
 
     ordered_columns = [
         column["name"] for column in columns if column["name"] not in metadata_columns
