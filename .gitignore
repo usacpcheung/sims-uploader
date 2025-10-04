@@ -19,6 +19,8 @@ Thumbs.db
 # Local data (don’t push real Excel/CSV with student info)
 *.xlsx
 *.csv
+uploads/*
+!uploads/.gitkeep
 
 # Secrets
 .env

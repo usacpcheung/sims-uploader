@@ -1,0 +1,4 @@
+ALTER TABLE `teach_record_raw`
+  MODIFY COLUMN `自定教學重點` TEXT NULL,
+  MODIFY COLUMN `備註` TEXT NULL,
+  MODIFY COLUMN `教學跟進/回饋` TEXT NULL;
