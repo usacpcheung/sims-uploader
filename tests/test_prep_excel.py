@@ -1,14 +1,17 @@
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 import warnings
+from collections import OrderedDict
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
+import pymysql
 
 # Ensure database configuration is available before importing the module under test.
 os.environ.setdefault("DB_HOST", "localhost")
@@ -97,6 +100,153 @@ class _SequenceConnection:
         cursor = _FakeCursor(payload.get("rows", []), payload.get("fetchone"))
         self.cursors.append(cursor)
         return cursor
+
+    def close(self):
+        self.closed = True
+
+
+class _DDLTrackingCursor:
+    def __init__(self, connection):
+        self._connection = connection
+        self._rows: list[dict[str, object]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def _build_column_details(self, column_type: str) -> dict[str, object]:
+        text = column_type.strip()
+        nullable = "NOT NULL" not in text.upper()
+        return {"type": text, "nullable": nullable, "default": None}
+
+    def _parse_table_name(self, query: str) -> str:
+        match = re.search(r"`([^`]+)`", query)
+        if not match:
+            raise AssertionError(f"Unable to parse table name from query: {query}")
+        return match.group(1)
+
+    def _split_column_definitions(self, body: str) -> list[str]:
+        parts: list[str] = []
+        current: list[str] = []
+        depth = 0
+        for char in body:
+            if char == "(":
+                depth += 1
+            elif char == ")" and depth > 0:
+                depth -= 1
+            if char == "," and depth == 0:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+            else:
+                current.append(char)
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    def _parse_create_definition(
+        self, query: str
+    ) -> tuple[str, "OrderedDict[str, dict[str, object]]"]:
+        table_name = self._parse_table_name(query)
+        start = query.find("(")
+        end = query.rfind(")")
+        body = query[start + 1 : end]
+        columns: "OrderedDict[str, dict[str, object]]" = OrderedDict()
+        for definition in self._split_column_definitions(body):
+            definition = definition.strip()
+            if not definition or not definition.startswith("`"):
+                continue
+            closing = definition.find("`", 1)
+            if closing == -1:
+                continue
+            name = definition[1:closing]
+            column_type = definition[closing + 1 :].strip()
+            if not column_type:
+                continue
+            columns[name] = self._build_column_details(column_type)
+        return table_name, columns
+
+    def _parse_alter_clause(self, query: str, clause: str) -> tuple[str, str]:
+        upper_query = query.upper()
+        index = upper_query.index(clause)
+        segment = query[index + len(clause) :].strip()
+        segment = segment.rstrip(";")
+        if segment.startswith("`"):
+            closing = segment.find("`", 1)
+            name = segment[1:closing]
+            column_type = segment[closing + 1 :].strip()
+        else:
+            parts = segment.split(None, 1)
+            name = parts[0].strip("`")
+            column_type = parts[1] if len(parts) > 1 else ""
+        return name, column_type.strip()
+
+    def execute(self, query, params=None):
+        self._connection.commands.append((query, params))
+        statement = query.strip()
+        upper = statement.upper()
+        if upper.startswith("SELECT COLUMN_NAME"):
+            schema, table = params
+            if table not in self._connection.tables:
+                raise pymysql.err.ProgrammingError(
+                    1146, f"Table '{schema}.{table}' doesn't exist"
+                )
+            self._rows = [
+                {
+                    "COLUMN_NAME": name,
+                    "IS_NULLABLE": "YES" if details["nullable"] else "NO",
+                    "COLUMN_DEFAULT": details.get("default"),
+                    "COLUMN_TYPE": details["type"],
+                }
+                for name, details in self._connection.tables[table].items()
+            ]
+        elif upper.startswith("CREATE TABLE"):
+            table_name, columns = self._parse_create_definition(statement)
+            self._connection.tables[table_name] = columns
+            self._rows = []
+        elif upper.startswith("ALTER TABLE"):
+            table_name = self._parse_table_name(statement)
+            if table_name not in self._connection.tables:
+                self._connection.tables[table_name] = OrderedDict()
+            if "ADD COLUMN" in upper:
+                name, column_type = self._parse_alter_clause(statement, "ADD COLUMN")
+                self._connection.tables[table_name][name] = self._build_column_details(
+                    column_type
+                )
+            if "MODIFY COLUMN" in upper:
+                name, column_type = self._parse_alter_clause(statement, "MODIFY COLUMN")
+                self._connection.tables[table_name][name] = self._build_column_details(
+                    column_type
+                )
+            self._rows = []
+        elif upper.startswith("SELECT 1 FROM"):
+            self._rows = []
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _DDLTrackingConnection:
+    def __init__(self):
+        self.tables: dict[str, "OrderedDict[str, dict[str, object]]"] = {}
+        self.commands: list[tuple[str, object]] = []
+        self.commits = 0
+        self.closed = False
+
+    def cursor(self, *args, **kwargs):
+        return _DDLTrackingCursor(self)
+
+    def commit(self):
+        self.commits += 1
 
     def close(self):
         self.closed = True
@@ -501,6 +651,30 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         existing = [
             {
+                "name": "file_hash",
+                "is_nullable": False,
+                "default": None,
+                "type": "char(64)",
+            },
+            {
+                "name": "batch_id",
+                "is_nullable": True,
+                "default": None,
+                "type": "char(36)",
+            },
+            {
+                "name": "source_year",
+                "is_nullable": True,
+                "default": None,
+                "type": "int",
+            },
+            {
+                "name": "ingested_at",
+                "is_nullable": False,
+                "default": None,
+                "type": "datetime",
+            },
+            {
                 "name": "日期",
                 "is_nullable": True,
                 "default": None,
@@ -723,6 +897,30 @@ class PrepExcelSchemaTests(unittest.TestCase):
         mock_get_table_config.return_value = config
 
         existing = [
+            {
+                "name": "file_hash",
+                "is_nullable": False,
+                "default": None,
+                "type": "char(64)",
+            },
+            {
+                "name": "batch_id",
+                "is_nullable": True,
+                "default": None,
+                "type": "char(36)",
+            },
+            {
+                "name": "source_year",
+                "is_nullable": True,
+                "default": None,
+                "type": "int",
+            },
+            {
+                "name": "ingested_at",
+                "is_nullable": False,
+                "default": None,
+                "type": "datetime",
+            },
             {
                 "name": "日期",
                 "is_nullable": True,
@@ -1084,6 +1282,74 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertIsNone(csv_path)
         self.assertIsInstance(file_hash, str)
         mock_hash_exists.assert_called_once()
+
+    @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
+    @mock.patch.object(prep_excel, "_get_table_config")
+    @mock.patch("app.prep_excel.pd.read_excel")
+    def test_main_recreates_missing_staging_table_with_metadata_defaults(
+        self,
+        mock_read_excel,
+        mock_get_table_config,
+        _mock_hash_exists,
+    ):
+        connection = _DDLTrackingConnection()
+        metadata_columns = (
+            "id",
+            "file_hash",
+            "batch_id",
+            "source_year",
+            "ingested_at",
+            "processed_at",
+        )
+        required_columns = ("日期", "任教老師")
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": frozenset(metadata_columns),
+            "metadata_column_order": metadata_columns,
+            "required_columns": frozenset(required_columns),
+            "required_column_order": required_columns,
+            "options": {},
+            "column_types": {"教學跟進/回饋": "TEXT NULL"},
+        }
+        mock_get_table_config.return_value = config
+        mock_read_excel.return_value = pd.DataFrame(
+            {
+                "日期": ["2024-01-01"],
+                "任教老師": ["Ms. Chan"],
+                "教學跟進/回饋": ["notes"],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            tmp.write(b"missing-table")
+            tmp.flush()
+            excel_path = tmp.name
+
+        try:
+            with mock.patch("pandas.DataFrame.to_csv", return_value=None):
+                prep_excel.main(excel_path, connection=connection, emit_stdout=False)
+        finally:
+            os.remove(excel_path)
+
+        create_statements = [
+            sql for sql, _params in connection.commands if sql.strip().upper().startswith("CREATE TABLE")
+        ]
+        self.assertEqual(len(create_statements), 1)
+
+        schema = connection.tables.get("teach_record_raw")
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertEqual(
+            schema["id"]["type"], "BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY"
+        )
+        self.assertEqual(schema["file_hash"]["type"], "CHAR(64) NOT NULL")
+        self.assertEqual(schema["batch_id"]["type"], "CHAR(36) NULL")
+        self.assertEqual(schema["ingested_at"]["type"], "DATETIME NOT NULL")
+        self.assertEqual(schema["processed_at"]["type"], "DATETIME NULL DEFAULT NULL")
+        self.assertEqual(schema["日期"]["type"], "VARCHAR(255) NULL")
+        self.assertEqual(schema["任教老師"]["type"], "VARCHAR(255) NULL")
+        self.assertEqual(schema["教學跟進/回饋"]["type"], "TEXT NULL")
+        self.assertGreaterEqual(connection.commits, 1)
 
 
 if __name__ == "__main__":
