@@ -239,6 +239,35 @@ def _freeze_db_settings(settings: Mapping[str, object]) -> tuple[tuple[str, obje
     return tuple(sorted((key, _freeze(val)) for key, val in settings.items()))
 
 
+def _normalise_configured_columns(values: Iterable[object]) -> list[str]:
+    """Coerce configured column names into a unique, ordered list of strings."""
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    def _iter_values(items: Iterable[object]):
+        for item in items:
+            if isinstance(item, str):
+                yield item
+            elif isinstance(item, (list, tuple, set)):
+                # Flatten one level of nested iterables that may appear in
+                # configuration JSON. Any deeper nesting is unlikely and would
+                # still be coerced via ``str`` below.
+                for sub_item in item:
+                    yield sub_item
+            else:
+                yield item
+
+    for raw_value in _iter_values(values):
+        text = str(raw_value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+
+    return cleaned
+
+
 def _parse_sheet_config_rows(
     rows: Sequence[Mapping[str, object]]
 ) -> dict[str, dict[str, dict[str, object]]]:
@@ -250,8 +279,12 @@ def _parse_sheet_config_rows(
             workbook_type = workbook_type.strip() or "default"
         else:
             workbook_type = "default"
-        metadata_columns = _loads_json(row.get("metadata_columns")) or []
-        required_columns = _loads_json(row.get("required_columns")) or []
+        metadata_columns = _normalise_configured_columns(
+            _loads_json(row.get("metadata_columns")) or []
+        )
+        required_columns = _normalise_configured_columns(
+            _loads_json(row.get("required_columns")) or []
+        )
         options = _loads_json(row.get("options")) or {}
         column_mappings = _loads_json(row.get("column_mappings"))
         normalized_table_source = "none"

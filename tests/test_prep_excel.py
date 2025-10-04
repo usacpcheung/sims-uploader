@@ -570,6 +570,39 @@ class PrepExcelSchemaTests(unittest.TestCase):
             {"日期": "DATETIME NULL"},
         )
 
+    def test_parse_sheet_config_rows_handles_nested_column_lists(self):
+        row = {
+            "workbook_type": "default",
+            "sheet_name": prep_excel.DEFAULT_SHEET,
+            "staging_table": "teach_record_raw",
+            "metadata_columns": json.dumps(
+                ["file_hash", ["batch_id", ""], ["source_year", "file_hash"]]
+            ),
+            "required_columns": json.dumps([["日期"], "", "任教老師", ["任教老師"]]),
+            "column_mappings": None,
+            "options": None,
+        }
+
+        config = prep_excel._parse_sheet_config_rows([row])
+        entry = config["default"][prep_excel.DEFAULT_SHEET]
+
+        self.assertEqual(
+            entry["metadata_column_order"],
+            ("file_hash", "batch_id", "source_year"),
+        )
+        self.assertEqual(
+            entry["metadata_columns"],
+            frozenset({"file_hash", "batch_id", "source_year"}),
+        )
+        self.assertEqual(
+            entry["required_column_order"],
+            ("日期", "任教老師"),
+        )
+        self.assertEqual(
+            entry["required_columns"],
+            frozenset({"日期", "任教老師"}),
+        )
+
     def test_get_schema_details_with_injected_connection(self):
         config_rows = [
             {
@@ -1416,17 +1449,38 @@ class PrepExcelMainTests(unittest.TestCase):
             with open(xlsx_path, "wb") as handle:
                 handle.write(b"dummy")
 
-            with mock.patch.object(
-                prep_excel.pd, "read_excel", return_value=df
-            ), mock.patch.object(
-                prep_excel, "_get_table_config", return_value={"table": "teach_record_raw", "options": {}},
-            ), mock.patch.object(
-                prep_excel,
-                "get_schema_details",
-                return_value={"order": ["日期", "任教老師"], "required": ["日期"]},
-            ), mock.patch.object(
-                prep_excel, "_staging_file_hash_exists", return_value=False
+            with (
+                mock.patch.object(
+                    prep_excel.pd, "read_excel", return_value=df
+                ),
+                mock.patch.object(
+                    prep_excel,
+                    "_get_table_config",
+                    return_value={"table": "teach_record_raw", "options": {}},
+                ),
+                mock.patch.object(
+                    prep_excel,
+                    "get_schema_details",
+                    return_value={"order": ["日期", "任教老師"], "required": ["日期"]},
+                ),
+                mock.patch.object(
+                    prep_excel, "_staging_file_hash_exists", return_value=False
+                ),
+                mock.patch.object(
+                    prep_excel, "_fetch_table_columns", return_value=[]
+                ),
+                mock.patch.object(prep_excel.pymysql, "connect") as mock_connect,
             ):
+                mock_connection = mock.MagicMock()
+                mock_cursor = mock.MagicMock()
+                mock_cursor.fetchone.return_value = None
+                mock_cursor.fetchall.return_value = []
+                mock_connection.cursor.return_value.__enter__.return_value = mock_cursor
+                mock_connection.cursor.return_value.__exit__.return_value = False
+                mock_connection.commit.return_value = None
+                mock_connection.close.return_value = None
+                mock_connect.return_value = mock_connection
+
                 csv_path, file_hash = prep_excel.main(
                     xlsx_path, emit_stdout=False
                 )
