@@ -5,6 +5,7 @@ import sys
 import hashlib
 import warnings
 from collections import OrderedDict
+from collections.abc import Iterable as IterableABC
 
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence
@@ -266,6 +267,22 @@ def _normalise_configured_columns(values: Iterable[object]) -> list[str]:
         cleaned.append(text)
 
     return cleaned
+
+
+def _coerce_configured_column_values(value: object | None) -> tuple[str, ...]:
+    """Normalise configured column collections regardless of their original shape."""
+
+    if value is None:
+        return ()
+
+    if isinstance(value, str):
+        iterable: IterableABC = (value,)
+    elif isinstance(value, IterableABC):
+        iterable = value
+    else:
+        iterable = (value,)
+
+    return tuple(_normalise_configured_columns(iterable))
 
 
 def _parse_sheet_config_rows(
@@ -548,12 +565,20 @@ def _ensure_staging_columns(
     db_settings: Mapping[str, object] | None = None,
 ) -> bool:
     table_name = config["table"]
-    metadata_columns = set(config.get("metadata_columns", ()))
-    metadata_column_order = tuple(config.get("metadata_column_order", ()))
+    metadata_columns = set(
+        _coerce_configured_column_values(config.get("metadata_columns"))
+    )
+    metadata_column_order = _coerce_configured_column_values(
+        config.get("metadata_column_order")
+    )
     column_types: Mapping[str, str] = config.get("column_types") or {}
-    required_column_order = tuple(config.get("required_column_order", ()))
+    required_column_order = _coerce_configured_column_values(
+        config.get("required_column_order")
+    )
     if not required_column_order and config.get("required_columns"):
-        required_column_order = tuple(sorted(config.get("required_columns", ())))
+        required_column_order = tuple(
+            sorted(_coerce_configured_column_values(config.get("required_columns")))
+        )
 
     metadata_defaults = _default_metadata_column_definitions()
 
@@ -667,8 +692,12 @@ def get_schema_details(
         connection=connection,
         db_settings=db_settings,
     )
-    metadata_columns = set(config.get("metadata_columns", ()))
-    required_columns_config = set(config.get("required_columns", ()))
+    metadata_columns = set(
+        _coerce_configured_column_values(config.get("metadata_columns"))
+    )
+    required_columns_config = set(
+        _coerce_configured_column_values(config.get("required_columns"))
+    )
     try:
         columns = _fetch_table_columns(
             config["table"], connection=connection, db_settings=db_settings

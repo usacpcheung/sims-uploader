@@ -352,6 +352,104 @@ class PrepExcelSchemaTests(unittest.TestCase):
             (prep_excel.DB["database"], "teach_record_raw"),
         )
 
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    def test_ensure_staging_columns_accepts_nested_config_values(
+        self, mock_fetch_columns
+    ):
+        mock_fetch_columns.return_value = [
+            {
+                "name": "file_hash",
+                "is_nullable": False,
+                "default": None,
+                "type": "char(64)",
+            },
+            {
+                "name": "batch_id",
+                "is_nullable": True,
+                "default": None,
+                "type": "char(36)",
+            },
+            {
+                "name": "日期",
+                "is_nullable": True,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "任教老師",
+                "is_nullable": True,
+                "default": None,
+                "type": "varchar(255)",
+            },
+        ]
+
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": [["file_hash"], ["batch_id"]],
+            "metadata_column_order": [["file_hash"], ["batch_id"]],
+            "required_columns": [["日期"], "任教老師"],
+            "required_column_order": [["日期"], "任教老師"],
+            "column_types": {},
+        }
+
+        connection = _AlteringConnection()
+
+        changed = prep_excel._ensure_staging_columns(
+            headers=["日期", "任教老師"],
+            config=config,
+            connection=connection,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(connection.commands, [])
+
+    @mock.patch.object(prep_excel, "_fetch_table_columns")
+    @mock.patch.object(prep_excel, "_get_table_config")
+    def test_get_schema_details_normalises_nested_configured_lists(
+        self, mock_get_config, mock_fetch_columns
+    ):
+        mock_get_config.return_value = {
+            "table": "teach_record_raw",
+            "metadata_columns": [["file_hash"], ["batch_id"]],
+            "required_columns": [["日期"], "任教老師"],
+        }
+        mock_fetch_columns.return_value = [
+            {
+                "name": "file_hash",
+                "is_nullable": False,
+                "default": None,
+                "type": "char(64)",
+            },
+            {
+                "name": "batch_id",
+                "is_nullable": True,
+                "default": None,
+                "type": "char(36)",
+            },
+            {
+                "name": "日期",
+                "is_nullable": False,
+                "default": None,
+                "type": "date",
+            },
+            {
+                "name": "任教老師",
+                "is_nullable": False,
+                "default": None,
+                "type": "varchar(255)",
+            },
+        ]
+
+        schema = prep_excel.get_schema_details(connection=object())
+
+        self.assertEqual(
+            schema,
+            {
+                "order": ["日期", "任教老師"],
+                "required": ["日期", "任教老師"],
+            },
+        )
+
     def test_get_table_config_supports_multiple_workbook_types(self):
         rows = [
             {
