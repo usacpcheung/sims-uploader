@@ -186,7 +186,12 @@ def set_status(
                     (status, job_id),
                 )
                 if cursor.rowcount == 0:
-                    raise ValueError(f"Upload job {job_id} does not exist")
+                    cursor.execute(
+                        "SELECT 1 FROM `upload_jobs` WHERE job_id = %s",
+                        (job_id,),
+                    )
+                    if cursor.fetchone() is None:
+                        raise ValueError(f"Upload job {job_id} does not exist")
                 cursor.execute(
                     (
                         "INSERT INTO `upload_job_events` (job_id, status, message) "

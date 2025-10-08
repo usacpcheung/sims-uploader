@@ -210,9 +210,71 @@ def test_set_status_missing_job_rolls_back(monkeypatch):
     assert "does not exist" in str(excinfo.value)
     assert executed_default == [
         ("UPDATE `upload_jobs` SET status = %s WHERE job_id = %s", ("done", "missing")),
+        ("SELECT 1 FROM `upload_jobs` WHERE job_id = %s", ("missing",)),
     ]
     assert connection.committed is False
     assert connection.rolled_back is True
+
+
+def test_set_status_noop_update_succeeds(monkeypatch):
+    job_id = "job"
+    executed_default = []
+    executed_dict = []
+    job_row = {
+        "job_id": job_id,
+        "original_filename": "file.csv",
+        "workbook_name": None,
+        "worksheet_name": None,
+        "file_size": None,
+        "status": "pending",
+        "created_at": datetime(2024, 1, 1, 12, 0, 0),
+        "updated_at": datetime(2024, 1, 1, 12, 5, 0),
+    }
+    event_row = {
+        "event_id": 5,
+        "job_id": job_id,
+        "status": "pending",
+        "message": "still pending",
+        "event_at": datetime(2024, 1, 1, 12, 10, 0),
+    }
+    connection = ConnectionStub(
+        {
+            None: [
+                CursorStub(
+                    executed_default,
+                    rowcount=0,
+                    fetchone_results=[(1,)],
+                    lastrowid=5,
+                )
+            ],
+            job_store.pymysql.cursors.DictCursor: [
+                CursorStub(
+                    executed_dict,
+                    fetchone_results=[job_row, event_row],
+                )
+            ],
+        }
+    )
+    _set_connection(monkeypatch, connection)
+
+    job, event = job_store.set_status(job_id, "pending", message="still pending")
+
+    assert executed_default == [
+        ("UPDATE `upload_jobs` SET status = %s WHERE job_id = %s", ("pending", job_id)),
+        ("SELECT 1 FROM `upload_jobs` WHERE job_id = %s", (job_id,)),
+        (
+            "INSERT INTO `upload_job_events` (job_id, status, message) VALUES (%s, %s, %s)",
+            (job_id, "pending", "still pending"),
+        ),
+    ]
+    assert executed_dict == [
+        ("SELECT * FROM `upload_jobs` WHERE job_id = %s", (job_id,)),
+        ("SELECT * FROM `upload_job_events` WHERE event_id = %s", (5,)),
+    ]
+    assert job == job_store.UploadJob(**job_row)
+    assert event == job_store.UploadJobEvent(**event_row)
+    assert connection.committed is True
+    assert connection.rolled_back is False
 
 
 def test_record_results_upserts_and_serializes(monkeypatch):
