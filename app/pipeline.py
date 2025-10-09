@@ -11,7 +11,7 @@ from typing import Iterable, Mapping
 
 import pymysql
 
-from app import ingest_excel, normalize_staging, prep_excel
+from app import ingest_excel, job_store, normalize_staging, prep_excel, validation
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +28,11 @@ class PipelineResult:
     batch_id: str | None
     ingested_at: datetime | None
     processed_at: datetime | None
+    column_coverage: dict[str, list[str]]
+    inserted_count: int
+    updated_count: int
+    rejected_rows_path: str | None
+    validation_errors: list[str]
     skipped: bool = False
 
 
@@ -77,7 +82,24 @@ def run_pipeline(
     source_year: str,
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
+    job_id: str | None = None,
 ) -> PipelineResult:
+    column_coverage: dict[str, list[str]] = {}
+    inserted_count = 0
+    updated_count = 0
+    rejected_rows_path: str | None = None
+    validation_errors: list[str] = []
+    processed_at: datetime | None = None
+    staging_result: ingest_excel.StagingLoadResult | None = None
+    prepared_batch: normalize_staging.PreparedNormalization | None = None
+    validation_result: validation.ValidationResult | None = None
+    staging_rows: list[Mapping[str, object]] = []
+    staging_table: str | None = None
+    normalized_table: str | None = None
+
+    if job_id:
+        job_store.mark_parsing(job_id, db_settings=db_settings)
+
     csv_path, file_hash = prep_excel.main(
         workbook_path,
         sheet,
@@ -90,6 +112,22 @@ def run_pipeline(
         LOGGER.info(
             "Skipping pipeline for %s; duplicate hash %s", workbook_path, file_hash
         )
+        if job_id:
+            job_store.record_results(
+                job_id,
+                total_rows=0,
+                processed_rows=0,
+                successful_rows=0,
+                rejected_rows=0,
+                normalized_table_name=None,
+                coverage_metadata={},
+                db_settings=db_settings,
+            )
+            job_store.mark_loaded(
+                job_id,
+                message="Duplicate upload detected",
+                db_settings=db_settings,
+            )
         return PipelineResult(
             file_hash=file_hash,
             staging_table=None,
@@ -99,6 +137,11 @@ def run_pipeline(
             batch_id=batch_id,
             ingested_at=None,
             processed_at=None,
+            column_coverage={},
+            inserted_count=0,
+            updated_count=0,
+            rejected_rows_path=None,
+            validation_errors=[],
             skipped=True,
         )
 
@@ -123,9 +166,7 @@ def run_pipeline(
         raise ValueError(
             f"Sheet {sheet!r} is missing a normalized_table configuration"
         )
-    column_mappings = table_config.get("column_mappings")
-    if not column_mappings:
-        column_mappings = None
+    column_mappings = table_config.get("column_mappings") or None
     column_types = table_config.get("column_types") or {}
     metadata_columns = table_config.get("normalized_metadata_columns")
     reserved_source_columns = table_config.get("reserved_source_columns")
@@ -135,30 +176,39 @@ def run_pipeline(
     connection = pymysql.connect(**settings)
     try:
         staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
-        resolved_mappings = normalize_staging.resolve_column_mappings(
+        prepared_batch = normalize_staging.prepare_normalization(
             staging_rows,
             column_mappings,
             metadata_columns=metadata_columns,
             reserved_source_columns=reserved_source_columns,
         )
+        column_coverage = normalize_staging.build_column_coverage(
+            prepared_batch.resolved_mappings
+        )
         normalize_staging.ensure_normalized_schema(
             connection,
             normalized_table,
-            resolved_mappings,
+            prepared_batch.resolved_mappings,
             column_types,
             metadata_columns=metadata_columns,
             column_type_overrides=column_type_overrides,
         )
 
+        if job_id:
+            job_store.mark_validating(job_id, db_settings=db_settings)
+
+        validation_result = validation.validate_rows(job_id, prepared_batch)
+        validation_errors = validation_result.errors
+        rejected_rows_path = validation_result.rejected_rows_path
+
         connection.begin()
-        normalized_rows = normalize_staging.insert_normalized_rows(
+        insert_result = normalize_staging.insert_normalized_rows(
             connection,
             normalized_table,
-            staging_rows,
-            resolved_mappings,
-            metadata_columns=metadata_columns,
-            reserved_source_columns=reserved_source_columns,
+            None,
+            prepared=validation_result.prepared,
         )
+        inserted_count = insert_result.inserted_count
         processed_at = normalize_staging.mark_staging_rows_processed(
             connection,
             staging_table,
@@ -166,21 +216,78 @@ def run_pipeline(
             file_hash=file_hash,
         )
         connection.commit()
-    except Exception:
+    except Exception as exc:
         connection.rollback()
+        if job_id:
+            rejected_total = 0
+            if validation_result is not None:
+                rejected_total = len(validation_result.prepared.rejected_rows)
+            elif prepared_batch is not None:
+                rejected_total = len(prepared_batch.rejected_rows)
+            job_store.record_results(
+                job_id,
+                total_rows=staging_result.rowcount if staging_result else None,
+                processed_rows=inserted_count + updated_count,
+                successful_rows=inserted_count + updated_count,
+                rejected_rows=rejected_total,
+                normalized_table_name=normalized_table,
+                coverage_metadata=column_coverage,
+                db_settings=db_settings,
+            )
+            if rejected_rows_path:
+                job_store.save_rejected_rows_path(
+                    job_id,
+                    rejected_rows_path,
+                    db_settings=db_settings,
+                )
+            job_store.mark_error(
+                job_id,
+                message=str(exc),
+                db_settings=db_settings,
+            )
         raise
     finally:
         connection.close()
+
+    rejected_total = (
+        len(validation_result.prepared.rejected_rows)
+        if validation_result
+        else 0
+    )
+
+    if job_id:
+        job_store.record_results(
+            job_id,
+            total_rows=staging_result.rowcount if staging_result else None,
+            processed_rows=inserted_count + updated_count,
+            successful_rows=inserted_count + updated_count,
+            rejected_rows=rejected_total,
+            normalized_table_name=normalized_table,
+            coverage_metadata=column_coverage,
+            db_settings=db_settings,
+        )
+        if rejected_rows_path:
+            job_store.save_rejected_rows_path(
+                job_id,
+                rejected_rows_path,
+                db_settings=db_settings,
+            )
+        job_store.mark_loaded(job_id, db_settings=db_settings)
 
     return PipelineResult(
         file_hash=file_hash,
         staging_table=staging_table,
         normalized_table=normalized_table,
-        staged_rows=staging_result.rowcount,
-        normalized_rows=normalized_rows,
-        batch_id=staging_result.batch_id,
-        ingested_at=staging_result.ingested_at,
+        staged_rows=staging_result.rowcount if staging_result else 0,
+        normalized_rows=inserted_count,
+        batch_id=staging_result.batch_id if staging_result else batch_id,
+        ingested_at=staging_result.ingested_at if staging_result else None,
         processed_at=processed_at,
+        column_coverage=column_coverage,
+        inserted_count=inserted_count,
+        updated_count=updated_count,
+        rejected_rows_path=rejected_rows_path,
+        validation_errors=validation_errors,
     )
 
 
