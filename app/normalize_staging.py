@@ -39,6 +39,33 @@ class TableConfig:
     column_mappings: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class RejectedRow:
+    """Representation of a rejected staging row and its validation errors."""
+
+    data: dict[str, object]
+    errors: tuple[str, ...]
+
+
+@dataclass
+class PreparedNormalization:
+    """Container describing prepared normalized rows and related metadata."""
+
+    normalized_rows: list[tuple[object, ...]]
+    rejected_rows: list[RejectedRow]
+    resolved_mappings: "OrderedDict[str, str]"
+    metadata_columns: tuple[str, ...]
+    ordered_columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class InsertNormalizedRowsResult:
+    """Outcome of inserting prepared normalized rows."""
+
+    inserted_count: int
+    prepared: PreparedNormalization
+
+
 def _dedupe_preserve(values: Iterable[object]) -> list[str]:
     seen: set[str] = set()
     cleaned: list[str] = []
@@ -193,6 +220,27 @@ def _coerce_business_value(column: str, value):
     return coercer(value)
 
 
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _coerce_business_value_with_error(column: str, value) -> tuple[object, str | None]:
+    coercer = _COERCERS.get(column)
+    if coercer is None:
+        if isinstance(value, str) and not value.strip():
+            return None, None
+        return value, None
+
+    coerced = coercer(value)
+    if coerced is None and not _is_blank(value):
+        return coerced, f"{column}: invalid value {value!r}"
+    return coerced, None
+
+
 def _normalise_metadata(column: str, row: Mapping[str, object]):
     if column == "raw_id":
         return row.get("id")
@@ -251,12 +299,13 @@ def _build_ordered_columns(
     return ordered
 
 
-def _build_row(
+def _build_row_with_errors(
     row: Mapping[str, object],
     column_mappings: Mapping[str, str],
     metadata_columns: Sequence[str],
-) -> tuple[object, ...]:
+) -> tuple[tuple[object, ...], list[str]]:
     values: list[object] = []
+    errors: list[str] = []
     ordered_columns = _build_ordered_columns(column_mappings, metadata_columns)
     metadata_set = set(metadata_columns)
     for column in ordered_columns:
@@ -265,8 +314,14 @@ def _build_row(
             continue
         source_column = column_mappings.get(column)
         value = row.get(source_column) if source_column else None
-        values.append(_coerce_business_value(column, value))
-    return tuple(values)
+        coerced, error = _coerce_business_value_with_error(column, value)
+        values.append(coerced)
+        if error:
+            if source_column and source_column != column:
+                errors.append(f"{error} (source: {source_column})")
+            else:
+                errors.append(error)
+    return tuple(values), errors
 
 
 def build_insert_statement(
@@ -283,17 +338,71 @@ def build_insert_statement(
     return sql, ordered_columns
 
 
+def _prepare_rows_core(
+    rows: Iterable[Mapping[str, object]],
+    column_mappings: Mapping[str, str],
+    metadata_columns: Sequence[str],
+) -> tuple[list[tuple[object, ...]], list[RejectedRow], tuple[str, ...]]:
+    normalized: list[tuple[object, ...]] = []
+    rejected: list[RejectedRow] = []
+    ordered_columns = _build_ordered_columns(column_mappings, metadata_columns)
+    for row in rows:
+        prepared_row, errors = _build_row_with_errors(row, column_mappings, metadata_columns)
+        if errors:
+            rejected.append(RejectedRow(data=dict(row), errors=tuple(errors)))
+            continue
+        normalized.append(prepared_row)
+    return normalized, rejected, tuple(ordered_columns)
+
+
 def prepare_rows(
     rows: Iterable[Mapping[str, object]],
     column_mappings: Mapping[str, str],
     *,
     metadata_columns: Sequence[str] | None = None,
 ) -> list[tuple[object, ...]]:
-    prepared: list[tuple[object, ...]] = []
     metadata = _resolve_metadata_columns(metadata_columns)
-    for row in rows:
-        prepared.append(_build_row(row, column_mappings, metadata))
+    prepared, _rejected, _ordered = _prepare_rows_core(rows, column_mappings, metadata)
     return prepared
+
+
+def prepare_normalization(
+    rows: Sequence[Mapping[str, object]],
+    column_mappings: Mapping[str, str] | None,
+    *,
+    metadata_columns: Sequence[str] | None = None,
+    reserved_source_columns: Iterable[str] | None = None,
+) -> PreparedNormalization:
+    resolved_mappings = resolve_column_mappings(
+        rows,
+        column_mappings,
+        metadata_columns=metadata_columns,
+        reserved_source_columns=reserved_source_columns,
+    )
+    metadata = _resolve_metadata_columns(metadata_columns)
+    prepared_rows, rejected_rows, ordered_columns = _prepare_rows_core(
+        rows,
+        resolved_mappings,
+        metadata,
+    )
+    return PreparedNormalization(
+        normalized_rows=prepared_rows,
+        rejected_rows=rejected_rows,
+        resolved_mappings=resolved_mappings,
+        metadata_columns=metadata,
+        ordered_columns=ordered_columns,
+    )
+
+
+def build_column_coverage(
+    resolved_mappings: Mapping[str, str],
+) -> dict[str, list[str]]:
+    coverage: dict[str, list[str]] = {}
+    for normalized_column, source_column in resolved_mappings.items():
+        if source_column is None:
+            continue
+        coverage.setdefault(source_column, []).append(normalized_column)
+    return coverage
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -548,33 +657,42 @@ def ensure_normalized_schema(
 def insert_normalized_rows(
     connection,
     table: str,
-    rows: Sequence[Mapping[str, object]],
+    rows: Sequence[Mapping[str, object]] | None,
     column_mappings: Mapping[str, str] | None = None,
     *,
     metadata_columns: Sequence[str] | None = None,
     reserved_source_columns: Iterable[str] | None = None,
-) -> int:
-    if not rows:
-        return 0
-    resolved_mappings = resolve_column_mappings(
-        rows,
-        column_mappings,
-        metadata_columns=metadata_columns,
-        reserved_source_columns=reserved_source_columns,
-    )
+    prepared: PreparedNormalization | None = None,
+) -> InsertNormalizedRowsResult:
+    if prepared is None:
+        rows = rows or []
+        prepared = prepare_normalization(
+            rows,
+            column_mappings,
+            metadata_columns=metadata_columns,
+            reserved_source_columns=reserved_source_columns,
+        )
+
+    normalized_rows = prepared.normalized_rows
+    if not normalized_rows:
+        return InsertNormalizedRowsResult(inserted_count=0, prepared=prepared)
+
     sql, _ = build_insert_statement(
-        table, resolved_mappings, metadata_columns=metadata_columns
-    )
-    prepared = prepare_rows(
-        rows,
-        resolved_mappings,
-        metadata_columns=metadata_columns,
+        table,
+        prepared.resolved_mappings,
+        metadata_columns=prepared.metadata_columns,
     )
     with connection.cursor() as cursor:
-        cursor.executemany(sql, prepared)
+        cursor.executemany(sql, normalized_rows)
         if getattr(cursor, "rowcount", None) not in (None, -1):
-            return cursor.rowcount
-    return len(prepared)
+            return InsertNormalizedRowsResult(
+                inserted_count=cursor.rowcount,
+                prepared=prepared,
+            )
+    return InsertNormalizedRowsResult(
+        inserted_count=len(normalized_rows),
+        prepared=prepared,
+    )
 
 
 def mark_staging_rows_processed(
@@ -618,6 +736,11 @@ __all__ = [
     "resolve_column_mappings",
     "TableConfig",
     "build_insert_statement",
+    "build_column_coverage",
+    "PreparedNormalization",
+    "RejectedRow",
+    "InsertNormalizedRowsResult",
+    "prepare_normalization",
     "insert_normalized_rows",
     "mark_staging_rows_processed",
     "prepare_rows",

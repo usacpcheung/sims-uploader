@@ -298,6 +298,42 @@ def record_results(
     return _dict_to_upload_job_result(result_row)
 
 
+def mark_parsing(
+    job_id: str,
+    *,
+    message: str | None = None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> tuple[UploadJob, UploadJobEvent]:
+    return set_status(job_id, "Parsing", message=message, db_settings=db_settings)
+
+
+def mark_validating(
+    job_id: str,
+    *,
+    message: str | None = None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> tuple[UploadJob, UploadJobEvent]:
+    return set_status(job_id, "Validating", message=message, db_settings=db_settings)
+
+
+def mark_loaded(
+    job_id: str,
+    *,
+    message: str | None = None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> tuple[UploadJob, UploadJobEvent]:
+    return set_status(job_id, "Loaded", message=message, db_settings=db_settings)
+
+
+def mark_error(
+    job_id: str,
+    *,
+    message: str | None = None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> tuple[UploadJob, UploadJobEvent]:
+    return set_status(job_id, "Errors", message=message, db_settings=db_settings)
+
+
 def save_rejected_rows_path(
     job_id: str,
     rejected_rows_path: str | None,

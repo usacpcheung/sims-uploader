@@ -85,13 +85,15 @@ files.
 
 ## Command-Line Workflows
 ### 1. Preprocess Excel Workbooks
-```bash
+- ```bash
 python -m app.prep_excel uploads/your_file.xlsx
 ```
 - Cleans header rows, drops empty columns, and aligns column order with the target staging table.
 - Hashes the workbook to prevent duplicate ingestion and appends the hash to the generated CSV filename.
 - Validates presence of required columns declared in `sheet_ingest_config`. Missing headers raise a
   `MissingColumnsError` (or exit with code `2` when run via CLI) so calling services can surface actionable feedback.
+- The CLI defaults to the `"default"` workbook type; ensure any workbook configuration intended for CLI use also inserts a
+  matching `"default"` row (or always invoke the CLI with an explicit `--workbook-type`).
 
 ### 2. Bulk Load Normalized Data
 ```bash
