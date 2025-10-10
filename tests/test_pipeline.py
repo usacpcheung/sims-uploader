@@ -811,64 +811,38 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
     assert connection.committed
 
 
-def test_cli_invokes_pipeline(monkeypatch, capsys):
-    result = pipeline.PipelineResult(
-        file_hash="hash-xyz",
-        staging_table="teach_record_raw",
-        normalized_table="teach_record_normalized",
-        staged_rows=2,
-        normalized_rows=2,
-        batch_id="batch-9",
-        ingested_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
-        processed_at=dt.datetime(2024, 5, 1, 12, tzinfo=dt.timezone.utc),
-        column_coverage={"姓名": ["姓名"]},
-        inserted_count=2,
-        updated_count=0,
-        rejected_rows_path=None,
-        validation_errors=[],
-    )
+def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
+    workbook = tmp_path / "workbook.xlsx"
+    workbook.write_bytes(b"data")
 
     captured_args = {}
 
-    def fake_run(
-        workbook,
-        sheet,
-        *,
-        workbook_type,
-        source_year,
-        batch_id,
-        db_settings=None,
-        job_id=None,
-    ):
-        captured_args.update(
-            {
-                "workbook": workbook,
-                "sheet": sheet,
-                "workbook_type": workbook_type,
-                "source_year": source_year,
-                "batch_id": batch_id,
-                "db_settings": db_settings,
-                "job_id": job_id,
-            }
-        )
-        return result
+    def fake_enqueue_job(**kwargs):
+        captured_args.update(kwargs)
+        return "job-123", object()
 
-    monkeypatch.setattr(pipeline, "run_pipeline", fake_run)
+    monkeypatch.setattr("app.job_runner.enqueue_job", fake_enqueue_job)
 
     returned = pipeline.cli(
-        ["workbook.xlsx", "SheetA", "--source-year", "2024", "--batch-id", "batch-9"]
+        [
+            str(workbook),
+            "SheetA",
+            "--source-year",
+            "2024",
+            "--batch-id",
+            "batch-9",
+        ]
     )
 
     out = capsys.readouterr().out
-    assert "Staged" in out
+    assert "Queued upload job job-123" in out
+    assert returned == "job-123"
     assert captured_args == {
-        "workbook": "workbook.xlsx",
+        "workbook_path": str(workbook),
         "sheet": "SheetA",
         "workbook_type": "default",
         "source_year": "2024",
         "batch_id": "batch-9",
-        "db_settings": None,
-        "job_id": None,
+        "file_size": workbook.stat().st_size,
     }
-    assert returned is result
 

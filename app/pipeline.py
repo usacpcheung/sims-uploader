@@ -7,11 +7,12 @@ import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Mapping
+from pathlib import Path
+from typing import Callable, Iterable, Mapping
 
 import pymysql
 
-from app import ingest_excel, job_store, normalize_staging, prep_excel, validation
+from app import ingest_excel, normalize_staging, prep_excel, validation
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class PipelineResult:
     normalized_table: str | None
     staged_rows: int
     normalized_rows: int
+    rejected_rows: int
     batch_id: str | None
     ingested_at: datetime | None
     processed_at: datetime | None
@@ -34,6 +36,14 @@ class PipelineResult:
     rejected_rows_path: str | None
     validation_errors: list[str]
     skipped: bool = False
+
+
+class PipelineExecutionError(RuntimeError):
+    """Raised when the pipeline fails mid-flight."""
+
+    def __init__(self, message: str, *, result: PipelineResult | None = None):
+        super().__init__(message)
+        self.result = result
 
 
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -83,6 +93,7 @@ def run_pipeline(
     batch_id: str | None = None,
     db_settings: Mapping[str, object] | None = None,
     job_id: str | None = None,
+    status_notifier: Callable[[str, str | None], None] | None = None,
 ) -> PipelineResult:
     column_coverage: dict[str, list[str]] = {}
     inserted_count = 0
@@ -96,9 +107,10 @@ def run_pipeline(
     staging_rows: list[Mapping[str, object]] = []
     staging_table: str | None = None
     normalized_table: str | None = None
+    file_hash: str | None = None
 
-    if job_id:
-        job_store.mark_parsing(job_id, db_settings=db_settings)
+    if status_notifier:
+        status_notifier("Parsing", None)
 
     csv_path, file_hash = prep_excel.main(
         workbook_path,
@@ -112,28 +124,13 @@ def run_pipeline(
         LOGGER.info(
             "Skipping pipeline for %s; duplicate hash %s", workbook_path, file_hash
         )
-        if job_id:
-            job_store.record_results(
-                job_id,
-                total_rows=0,
-                processed_rows=0,
-                successful_rows=0,
-                rejected_rows=0,
-                normalized_table_name=None,
-                coverage_metadata={},
-                db_settings=db_settings,
-            )
-            job_store.mark_loaded(
-                job_id,
-                message="Duplicate upload detected",
-                db_settings=db_settings,
-            )
         return PipelineResult(
             file_hash=file_hash,
             staging_table=None,
             normalized_table=None,
             staged_rows=0,
             normalized_rows=0,
+            rejected_rows=0,
             batch_id=batch_id,
             ingested_at=None,
             processed_at=None,
@@ -194,8 +191,8 @@ def run_pipeline(
             column_type_overrides=column_type_overrides,
         )
 
-        if job_id:
-            job_store.mark_validating(job_id, db_settings=db_settings)
+        if status_notifier:
+            status_notifier("Validating", None)
 
         validation_result = validation.validate_rows(job_id, prepared_batch)
         validation_errors = validation_result.errors
@@ -218,34 +215,29 @@ def run_pipeline(
         connection.commit()
     except Exception as exc:
         connection.rollback()
-        if job_id:
-            rejected_total = 0
-            if validation_result is not None:
-                rejected_total = len(validation_result.prepared.rejected_rows)
-            elif prepared_batch is not None:
-                rejected_total = len(prepared_batch.rejected_rows)
-            job_store.record_results(
-                job_id,
-                total_rows=staging_result.rowcount if staging_result else None,
-                processed_rows=inserted_count + updated_count,
-                successful_rows=inserted_count + updated_count,
-                rejected_rows=rejected_total,
-                normalized_table_name=normalized_table,
-                coverage_metadata=column_coverage,
-                db_settings=db_settings,
-            )
-            if rejected_rows_path:
-                job_store.save_rejected_rows_path(
-                    job_id,
-                    rejected_rows_path,
-                    db_settings=db_settings,
-                )
-            job_store.mark_error(
-                job_id,
-                message=str(exc),
-                db_settings=db_settings,
-            )
-        raise
+        rejected_total = 0
+        if validation_result is not None:
+            rejected_total = len(validation_result.prepared.rejected_rows)
+        elif prepared_batch is not None:
+            rejected_total = len(prepared_batch.rejected_rows)
+        result = PipelineResult(
+            file_hash=file_hash,
+            staging_table=staging_table,
+            normalized_table=normalized_table,
+            staged_rows=staging_result.rowcount if staging_result else 0,
+            normalized_rows=inserted_count,
+            rejected_rows=rejected_total,
+            batch_id=staging_result.batch_id if staging_result else batch_id,
+            ingested_at=staging_result.ingested_at if staging_result else None,
+            processed_at=processed_at,
+            column_coverage=column_coverage,
+            inserted_count=inserted_count,
+            updated_count=updated_count,
+            rejected_rows_path=rejected_rows_path,
+            validation_errors=validation_errors,
+            skipped=False,
+        )
+        raise PipelineExecutionError(str(exc), result=result) from exc
     finally:
         connection.close()
 
@@ -255,31 +247,13 @@ def run_pipeline(
         else 0
     )
 
-    if job_id:
-        job_store.record_results(
-            job_id,
-            total_rows=staging_result.rowcount if staging_result else None,
-            processed_rows=inserted_count + updated_count,
-            successful_rows=inserted_count + updated_count,
-            rejected_rows=rejected_total,
-            normalized_table_name=normalized_table,
-            coverage_metadata=column_coverage,
-            db_settings=db_settings,
-        )
-        if rejected_rows_path:
-            job_store.save_rejected_rows_path(
-                job_id,
-                rejected_rows_path,
-                db_settings=db_settings,
-            )
-        job_store.mark_loaded(job_id, db_settings=db_settings)
-
     return PipelineResult(
         file_hash=file_hash,
         staging_table=staging_table,
         normalized_table=normalized_table,
         staged_rows=staging_result.rowcount if staging_result else 0,
         normalized_rows=inserted_count,
+        rejected_rows=rejected_total,
         batch_id=staging_result.batch_id if staging_result else batch_id,
         ingested_at=staging_result.ingested_at if staging_result else None,
         processed_at=processed_at,
@@ -291,38 +265,34 @@ def run_pipeline(
     )
 
 
-def cli(argv: Iterable[str] | None = None) -> PipelineResult:
+def cli(argv: Iterable[str] | None = None) -> str:
+    from app import job_runner  # Imported lazily to avoid circular dependency
+
     args = _parse_args(argv)
     try:
-        result = run_pipeline(
-            args.workbook,
-            args.sheet,
+        file_size = Path(args.workbook).stat().st_size
+    except OSError as exc:  # pragma: no cover - exercised via CLI integration
+        print(f"Unable to stat workbook {args.workbook}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    try:
+        job_id, _ = job_runner.enqueue_job(
+            workbook_path=args.workbook,
+            sheet=args.sheet,
             workbook_type=args.workbook_type,
             source_year=args.source_year,
             batch_id=args.batch_id,
+            file_size=file_size,
         )
+    except job_runner.UploadLimitExceeded as exc:
+        print(f"Upload rejected: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     except Exception as exc:  # pragma: no cover - exercised via CLI integration
-        print(f"Pipeline failed: {exc}", file=sys.stderr)
+        print(f"Failed to enqueue upload: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
-    if result.skipped:
-        print(
-            f"Skipped ingest; duplicate file hash {result.file_hash} already processed."
-        )
-    else:
-        print(
-            "Staged {rows} rows into {staging} and normalized {normalized} rows into {normalized_table}. "
-            "file_hash={hash} batch_id={batch}"
-            .format(
-                rows=result.staged_rows,
-                staging=result.staging_table,
-                normalized=result.normalized_rows,
-                normalized_table=result.normalized_table,
-                hash=result.file_hash,
-                batch=result.batch_id,
-            )
-        )
-    return result
+    print(f"Queued upload job {job_id} for workbook {args.workbook}")
+    return job_id
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via manual CLI usage
