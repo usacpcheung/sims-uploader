@@ -6,5 +6,7 @@ sqlalchemy>=2.0
 # for API layer (later, when you build upload endpoints)
 fastapi>=0.111
 uvicorn[standard]>=0.30
+rq>=1.15
+redis>=5.0
 
 python-dotenv>=1.0   # load DB creds from .env
