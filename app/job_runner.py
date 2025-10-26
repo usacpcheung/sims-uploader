@@ -215,6 +215,13 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             message = str(exc)
         job_store.mark_error(job_id, message=message, db_settings=db_settings)
         raise
+    except Exception as exc:  # pragma: no cover - defensive guard for unexpected failures
+        job_store.mark_error(
+            job_id,
+            message=f"Unexpected error: {exc}",
+            db_settings=db_settings,
+        )
+        raise
 
     _record_job_results(job_id, result, db_settings=db_settings)
 
