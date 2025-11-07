@@ -11,3 +11,4 @@ redis>=5.0
 httpx>=0.27
 
 python-dotenv>=1.0   # load DB creds from .env
+jinja2>=3.1

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from app import job_runner, job_store
+from app.web import router as web_router
 
 try:  # pragma: no cover - optional during unit tests
     from app.pipeline import PipelineExecutionError
@@ -18,6 +21,11 @@ except Exception:  # pragma: no cover - defensive when DB env vars are missing
     PipelineExecutionError = None  # type: ignore[assignment]
 
 app = FastAPI(title="SIMS Upload API")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+app.include_router(web_router)
 
 
 class UploadJobModel(BaseModel):
