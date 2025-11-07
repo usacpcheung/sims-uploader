@@ -153,6 +153,14 @@ pytest
 The suite currently focuses on the job store to guarantee SQL parameters, transaction boundaries, and JSON serialization are
 stable. Additional tests will be added as more ingest pipelines and APIs come online.
 
+## API Service
+- Start the FastAPI application with Uvicorn:
+  ```bash
+  uvicorn app.api:app --reload
+  ```
+- `POST /uploads` mirrors the CLI queue helper and enforces the same file-size/row-count hints before scheduling work.
+- `GET /uploads/{job_id}`, `/uploads/{job_id}/events`, and `GET /uploads` expose the job store helpers for dashboards or CLI tooling to poll upload progress.
+
 ## Operational Notes
 - The repository ignores `.xlsx`, `.csv`, `.env`, and everything inside `uploads/`; never commit real student or teacher data.
 - Always configure MariaDB with `utf8mb4` to handle Chinese characters, emoji, and future multilingual content.
