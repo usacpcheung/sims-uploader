@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}SIMS Uploader · New Upload{% endblock %}
+
+{% block content %}
+  <section class="panel">
+    <h2>Enqueue a new upload</h2>
+    <p>
+      Provide workbook details and optional limits to enqueue a new upload job.
+    </p>
+    <div id="form-errors" class="alert alert--error" role="alert" hidden></div>
+    <form id="upload-form" class="form-grid" novalidate>
+      <div class="field-group">
+        <label for="workbook_path">Workbook path<span aria-hidden="true"> *</span></label>
+        <input
+          type="text"
+          id="workbook_path"
+          name="workbook_path"
+          required
+          autocomplete="off"
+          placeholder="\\\path\to\workbook.xlsx"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="workbook_name">Workbook name</label>
+        <input
+          type="text"
+          id="workbook_name"
+          name="workbook_name"
+          autocomplete="off"
+          placeholder="Workbook display name"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="sheet">Sheet<span aria-hidden="true"> *</span></label>
+        <input
+          type="text"
+          id="sheet"
+          name="sheet"
+          required
+          autocomplete="off"
+          placeholder="Worksheet reference"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="worksheet_name">Worksheet name</label>
+        <input
+          type="text"
+          id="worksheet_name"
+          name="worksheet_name"
+          autocomplete="off"
+          placeholder="Optional worksheet name override"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="source_year">Source year<span aria-hidden="true"> *</span></label>
+        <input
+          type="text"
+          id="source_year"
+          name="source_year"
+          required
+          autocomplete="off"
+          placeholder="2024"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="workbook_type">Workbook type</label>
+        <input
+          type="text"
+          id="workbook_type"
+          name="workbook_type"
+          value="default"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="batch_id">Batch ID</label>
+        <input type="text" id="batch_id" name="batch_id" autocomplete="off" />
+      </div>
+
+      <div class="field-group">
+        <label for="file_size">File size (bytes)</label>
+        <input type="number" id="file_size" name="file_size" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="row_count">Row count</label>
+        <input type="number" id="row_count" name="row_count" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="max_file_size">Max file size (bytes)</label>
+        <input type="number" id="max_file_size" name="max_file_size" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="max_rows">Max rows</label>
+        <input type="number" id="max_rows" name="max_rows" min="0" step="1" />
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" class="primary-button">Submit upload job</button>
+        <span id="form-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function () {
+      const form = document.getElementById('upload-form');
+      if (!form) {
+        return;
+      }
+
+      const errorBox = document.getElementById('form-errors');
+      const statusBox = document.getElementById('form-status');
+      const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
+
+      function resetFeedback() {
+        if (errorBox) {
+          errorBox.hidden = true;
+          errorBox.textContent = '';
+        }
+        if (statusBox) {
+          statusBox.textContent = '';
+        }
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        resetFeedback();
+
+        const submitButton = form.querySelector('button[type="submit"]');
+        if (submitButton) {
+          submitButton.disabled = true;
+        }
+        if (statusBox) {
+          statusBox.textContent = 'Submitting upload request…';
+        }
+
+        const formData = new FormData(form);
+        const payload = {};
+        for (const [key, value] of formData.entries()) {
+          if (value === '') {
+            payload[key] = null;
+            continue;
+          }
+          if (numberFields.has(key)) {
+            payload[key] = Number(value);
+          } else {
+            payload[key] = value;
+          }
+        }
+
+        try {
+          const response = await fetch('/uploads', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+
+          const contentType = response.headers.get('content-type');
+          const isJson = contentType && contentType.includes('application/json');
+          const data = isJson ? await response.json() : null;
+
+          if (response.status === 202 && data && data.job && data.job.job_id) {
+            if (statusBox) {
+              statusBox.textContent = 'Upload queued! Redirecting to job details…';
+            }
+            const jobId = data.job.job_id;
+            window.location.assign(`/uploads/${encodeURIComponent(jobId)}`);
+            return;
+          }
+
+          if (response.status === 400 && data) {
+            const messages = [data.detail, data.validation_summary].filter(Boolean);
+            if (errorBox) {
+              errorBox.textContent = messages.join(' — ');
+              errorBox.hidden = false;
+            }
+            if (statusBox) {
+              statusBox.textContent = '';
+            }
+            return;
+          }
+
+          throw new Error('Unexpected response from server');
+        } catch (error) {
+          if (errorBox) {
+            errorBox.textContent = error instanceof Error ? error.message : 'Failed to submit request';
+            errorBox.hidden = false;
+          }
+          if (statusBox) {
+            statusBox.textContent = '';
+          }
+        } finally {
+          const submitButton = form.querySelector('button[type="submit"]');
+          if (submitButton) {
+            submitButton.disabled = false;
+          }
+        }
+      });
+    })();
+  </script>
+{% endblock %}

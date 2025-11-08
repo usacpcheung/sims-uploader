@@ -19,4 +19,11 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 async def render_home(request: Request) -> HTMLResponse:
     """Render the landing page for the uploader UI."""
 
-    return templates.TemplateResponse("base.html", {"request": request})
+    return templates.TemplateResponse("home.html", {"request": request})
+
+
+@router.get("/uploads/new", response_class=HTMLResponse)
+async def render_new_upload_form(request: Request) -> HTMLResponse:
+    """Render the form for enqueuing a new upload job."""
+
+    return templates.TemplateResponse("uploads/new.html", {"request": request})
