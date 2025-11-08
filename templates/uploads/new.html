@@ -9,7 +9,13 @@
       Provide workbook details and optional limits to enqueue a new upload job.
     </p>
     <div id="form-errors" class="alert alert--error" role="alert" hidden></div>
-    <form id="upload-form" class="form-grid" novalidate>
+    <form
+      id="upload-form"
+      class="form-grid"
+      novalidate
+      data-enqueue-url="{{ request.url_for('create_upload_job') }}"
+      data-job-detail-url="{{ request.url_for('get_upload_job', job_id='__JOB_ID__') }}"
+    >
       <div class="field-group">
         <label for="workbook_path">Workbook path<span aria-hidden="true"> *</span></label>
         <input
@@ -123,6 +129,13 @@
       const errorBox = document.getElementById('form-errors');
       const statusBox = document.getElementById('form-status');
       const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
+      const enqueueUrl = form.dataset.enqueueUrl;
+      const jobDetailUrlTemplate = form.dataset.jobDetailUrl;
+
+      if (!enqueueUrl || !jobDetailUrlTemplate) {
+        console.error('Upload form is missing required URL data attributes.');
+        return;
+      }
 
       function resetFeedback() {
         if (errorBox) {
@@ -161,7 +174,7 @@
         }
 
         try {
-          const response = await fetch('/uploads', {
+          const response = await fetch(enqueueUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json'
@@ -178,7 +191,11 @@
               statusBox.textContent = 'Upload queued! Redirecting to job details…';
             }
             const jobId = data.job.job_id;
-            window.location.assign(`/uploads/${encodeURIComponent(jobId)}`);
+            const jobDetailUrl = jobDetailUrlTemplate.replace(
+              '__JOB_ID__',
+              encodeURIComponent(jobId)
+            );
+            window.location.assign(jobDetailUrl);
             return;
           }
 
