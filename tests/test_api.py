@@ -14,7 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
 
+from pathlib import Path
+
 from app import api, job_runner, job_store
+from app import storage
 
 
 def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
@@ -71,7 +74,9 @@ def test_create_upload_success(monkeypatch):
     job = _make_job()
 
     def fake_enqueue_job(**kwargs):
-        assert kwargs["workbook_path"] == "uploads/example.xlsx"
+        stored_path = kwargs["workbook_path"]
+        assert stored_path
+        assert storage.get_original_filename(stored_path) == "example.xlsx"
         assert kwargs["sheet"] == "SHEET"
         assert kwargs["source_year"] == "2024"
         assert kwargs["file_size"] == 2048
@@ -97,6 +102,56 @@ def test_create_upload_success(monkeypatch):
     payload = response.json()
     assert payload["job"]["job_id"] == job.job_id
     assert payload["job"]["original_filename"] == job.original_filename
+
+
+def test_upload_file_success(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "uploads"
+    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(storage_dir))
+
+    client = TestClient(api.app)
+    content = b"sample content"
+    response = client.post(
+        "/uploads/files",
+        files={"file": ("example.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    stored_path = Path(body["stored_path"])
+    assert stored_path.exists()
+    assert stored_path.read_bytes() == content
+    assert body["original_filename"] == "example.xlsx"
+    assert body["file_size"] == len(content)
+    assert storage.get_original_filename(stored_path) == "example.xlsx"
+
+
+def test_upload_file_rejects_bad_extension(monkeypatch):
+    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(Path.cwd() / "uploads"))
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads/files",
+        files={"file": ("example.txt", b"irrelevant", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported" in response.json()["detail"]
+
+
+def test_upload_file_respects_size_limit(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "uploads"
+    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(storage_dir))
+    monkeypatch.setenv(job_runner.FILE_SIZE_LIMIT_ENV, "5")
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads/files",
+        files={"file": ("example.xlsx", b"0123456", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert "exceeds" in payload["detail"]
 
 
 def test_create_upload_limit_violation(monkeypatch):
