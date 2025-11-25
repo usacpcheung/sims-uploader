@@ -13,10 +13,11 @@ os.environ.setdefault("DB_CHARSET", "utf8mb4")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
+import pytest
 
 from pathlib import Path
 
-from app import api, job_runner, job_store
+from app import api, config, job_runner, job_store
 from app import storage
 
 
@@ -70,17 +71,45 @@ def _make_events(job_id: str = "job-123") -> list[job_store.UploadJobEvent]:
     ]
 
 
-def test_create_upload_success(monkeypatch):
+@pytest.fixture
+def upload_storage_dir(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "uploads"
+    monkeypatch.setenv(config.UPLOAD_STORAGE_DIR_ENV, str(storage_dir))
+    monkeypatch.setattr(config, "load_environment", lambda dotenv_path=None: None)
+    return storage_dir
+
+
+@pytest.fixture
+def staged_upload(upload_storage_dir):
+    client = TestClient(api.app)
+    content = b"sample content"
+    response = client.post(
+        "/uploads/files",
+        files={"file": ("example.xlsx", content, "application/vnd.ms-excel")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    stored_path = Path(data["stored_path"])
+    return data, stored_path, content
+
+
+def test_create_upload_success(monkeypatch, staged_upload):
+    staging_payload, stored_path, _ = staged_upload
     job = _make_job()
 
     def fake_enqueue_job(**kwargs):
-        stored_path = kwargs["workbook_path"]
-        assert stored_path
-        assert storage.get_original_filename(stored_path) == "example.xlsx"
+        incoming_path = Path(kwargs["workbook_path"])
+        assert incoming_path.exists()
+        assert incoming_path == stored_path
+        assert (
+            storage.get_original_filename(incoming_path)
+            == staging_payload["original_filename"]
+        )
         assert kwargs["sheet"] == "SHEET"
         assert kwargs["source_year"] == "2024"
-        assert kwargs["file_size"] == 2048
+        assert kwargs["file_size"] == staging_payload["file_size"]
         assert kwargs["row_count"] == 123
+        assert kwargs["workbook_name"] == staging_payload["original_filename"]
         return job.job_id, object()
 
     monkeypatch.setattr(job_runner, "enqueue_job", fake_enqueue_job)
@@ -90,10 +119,11 @@ def test_create_upload_success(monkeypatch):
     response = client.post(
         "/uploads",
         json={
-            "workbook_path": "uploads/example.xlsx",
+            "workbook_path": staging_payload["stored_path"],
+            "workbook_name": staging_payload["original_filename"],
             "sheet": "SHEET",
             "source_year": "2024",
-            "file_size": 2048,
+            "file_size": staging_payload["file_size"],
             "row_count": 123,
         },
     )
@@ -104,30 +134,16 @@ def test_create_upload_success(monkeypatch):
     assert payload["job"]["original_filename"] == job.original_filename
 
 
-def test_upload_file_success(tmp_path, monkeypatch):
-    storage_dir = tmp_path / "uploads"
-    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(storage_dir))
-
-    client = TestClient(api.app)
-    content = b"sample content"
-    response = client.post(
-        "/uploads/files",
-        files={"file": ("example.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-    )
-
-    assert response.status_code == 201
-    body = response.json()
-    stored_path = Path(body["stored_path"])
+def test_upload_file_success(staged_upload):
+    staging_payload, stored_path, content = staged_upload
     assert stored_path.exists()
     assert stored_path.read_bytes() == content
-    assert body["original_filename"] == "example.xlsx"
-    assert body["file_size"] == len(content)
+    assert staging_payload["original_filename"] == "example.xlsx"
+    assert staging_payload["file_size"] == len(content)
     assert storage.get_original_filename(stored_path) == "example.xlsx"
 
 
-def test_upload_file_rejects_bad_extension(monkeypatch):
-    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(Path.cwd() / "uploads"))
-
+def test_upload_file_rejects_bad_extension(monkeypatch, upload_storage_dir):
     client = TestClient(api.app)
     response = client.post(
         "/uploads/files",
@@ -138,9 +154,7 @@ def test_upload_file_rejects_bad_extension(monkeypatch):
     assert "Unsupported" in response.json()["detail"]
 
 
-def test_upload_file_respects_size_limit(tmp_path, monkeypatch):
-    storage_dir = tmp_path / "uploads"
-    monkeypatch.setenv("UPLOAD_STORAGE_DIR", str(storage_dir))
+def test_upload_file_respects_size_limit(monkeypatch, upload_storage_dir):
     monkeypatch.setenv(job_runner.FILE_SIZE_LIMIT_ENV, "5")
 
     client = TestClient(api.app)
@@ -152,6 +166,38 @@ def test_upload_file_respects_size_limit(tmp_path, monkeypatch):
     assert response.status_code == 400
     payload = response.json()
     assert "exceeds" in payload["detail"]
+
+
+def test_upload_flow_stages_then_enqueues(monkeypatch, staged_upload):
+    staging_payload, stored_path, _ = staged_upload
+    job = _make_job("staged-job")
+
+    captured = {}
+
+    def fake_enqueue_job(**kwargs):
+        captured.update(kwargs)
+        return job.job_id, object()
+
+    monkeypatch.setattr(job_runner, "enqueue_job", fake_enqueue_job)
+    monkeypatch.setattr(job_store, "get_job", lambda job_id: job)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": staging_payload["stored_path"],
+            "workbook_name": staging_payload["original_filename"],
+            "sheet": "Sheet A",
+            "source_year": "2023",
+            "file_size": staging_payload["file_size"],
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["workbook_path"] == str(stored_path)
+    assert captured["file_size"] == staging_payload["file_size"]
+    assert captured["workbook_name"] == staging_payload["original_filename"]
+    assert captured["sheet"] == "Sheet A"
 
 
 def test_create_upload_limit_violation(monkeypatch):
@@ -195,7 +241,9 @@ def test_get_upload_detail_missing_job(monkeypatch):
     monkeypatch.setattr(
         job_store,
         "get_job",
-        lambda job_id: (_ for _ in ()).throw(ValueError(f"Upload job {job_id} not found")),
+        lambda job_id: (_ for _ in ()).throw(
+            ValueError(f"Upload job {job_id} not found")
+        ),
     )
 
     client = TestClient(api.app)
