@@ -7,21 +7,32 @@ should behave so the front end remains aligned with the backend.
 
 ## Upload form
 
-**Backed by:** `POST /uploads`
+**Backed by:**
+* `POST /uploads/files` for streaming the workbook binary into the staging
+  directory configured by `UPLOAD_STORAGE_DIR` (default `./uploads`).
+* `POST /uploads` for enqueueing the job with the persisted file path.
 
 The upload form is responsible for collecting the metadata required to enqueue a
-new workbook. Submit the JSON body defined by `EnqueueUploadRequest`:
+new workbook. Flow:
+
+1. Call `POST /uploads/files` with `multipart/form-data`. The API enforces
+   extension checks and the file-size limit derived from
+   `UPLOAD_MAX_FILE_SIZE_BYTES`/`max_file_size`.
+2. Use the returned `stored_path` as `workbook_path` when submitting the JSON
+   body defined by `EnqueueUploadRequest` to `POST /uploads`. Include the
+   `file_size` reported by the staging response when available so the queue
+   helper can reuse it for limit checks.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `workbook_path` | string | ✅ | Absolute or repo-relative path where the API server can read the workbook. The backend trims this to populate `original_filename`. |
+| `workbook_path` | string | ✅ | `stored_path` returned by `POST /uploads/files`; no pre-positioned server path is required. The backend trims this to populate `original_filename`. |
 | `sheet` | string | ✅ | Worksheet tab to import. The worker defaults to `prep_excel.DEFAULT_SHEET` if omitted, but the API layer requires it. |
 | `source_year` | string | ✅ | Stored with the job payload so downstream normalization can enforce year-specific rules. |
 | `workbook_type` | string | ❌ | Defaults to `"default"`; expose a select when alternative pipelines exist. |
 | `batch_id` | string | ❌ | Associates multiple uploads with a batch. |
 | `workbook_name` | string | ❌ | Human-friendly workbook label surfaced in job listings. |
 | `worksheet_name` | string | ❌ | Friendly sheet label surfaced in job listings. |
-| `file_size` | integer | ❌ | Bytes. When provided, limit enforcement happens synchronously and failures surface as `400` errors. |
+| `file_size` | integer | ❌ | Bytes. Populate with the size returned by `POST /uploads/files` so limit enforcement can happen synchronously and surface as `400` errors. |
 | `row_count` | integer | ❌ | Used by the queue helper for preflight limit checks. |
 | `max_file_size` | integer | ❌ | Optional override for instance-wide limit. Leave blank to rely on defaults. |
 | `max_rows` | integer | ❌ | Optional override for maximum row count. |
@@ -119,3 +130,14 @@ form the timeline. Highlight the most recent status to match the header badge.
 * Event timeline deltas – fetching the full timeline on every poll is workable
   now, but we should track an enhancement to support “since event_id” filtering if
   latency becomes a concern.
+
+### Operational considerations for browser uploads
+
+* `UPLOAD_STORAGE_DIR` controls where uploaded binaries land. Default is
+  `./uploads`; choose a persistent volume so staged files survive restarts until
+  they are processed.
+* Plan disk space around `UPLOAD_MAX_FILE_SIZE_BYTES`, the number of concurrent
+  workers reading from `UPLOAD_QUEUE_NAME`, and any stricter `max_rows`/`UPLOAD_MAX_ROWS`
+  limits set at runtime.
+* Implement a periodic cleanup job to delete staged files once ingestion has
+  completed to prevent the storage volume from filling over time.
