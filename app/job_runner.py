@@ -6,7 +6,6 @@ import argparse
 import logging
 import os
 import signal
-from pathlib import Path
 from typing import Any, Mapping
 
 try:  # pragma: no cover - optional dependency guard
@@ -21,6 +20,7 @@ except ImportError:  # pragma: no cover
 
 from app import job_store, pipeline, prep_excel
 from app.config import load_environment
+from app.storage import get_original_filename
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def enqueue_job(
     queue = queue or get_queue()
 
     job = job_store.create_job(
-        original_filename=Path(workbook_path).name,
+        original_filename=get_original_filename(workbook_path),
         workbook_name=workbook_name,
         worksheet_name=worksheet_name,
         file_size=file_size,
@@ -153,6 +153,13 @@ def enqueue_job(
     rq_job = queue.enqueue(process_job, job.job_id, payload, job_id=job.job_id)
     LOGGER.info("Enqueued upload job %s for %s", job.job_id, workbook_path)
     return job.job_id, rq_job
+
+
+def resolve_file_size_limit(max_file_size: int | None = None) -> int | None:
+    """Return the effective file size limit in bytes."""
+
+    _load_environment()
+    return _resolve_int(max_file_size, FILE_SIZE_LIMIT_ENV, DEFAULT_FILE_SIZE_LIMIT)
 
 
 def _record_job_results(

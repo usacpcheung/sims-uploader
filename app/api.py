@@ -7,12 +7,14 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from app import job_runner, job_store
+from app.config import get_upload_storage_dir
+from app.storage import generate_stored_path, get_original_filename, validate_extension
 from app.web import router as web_router
 
 try:  # pragma: no cover - optional during unit tests
@@ -108,6 +110,14 @@ class ErrorResponse(BaseModel):
     validation_summary: str | None = None
 
 
+class UploadFileResponse(BaseModel):
+    """Response returned after persisting an uploaded file."""
+
+    stored_path: str
+    original_filename: str
+    file_size: int
+
+
 @app.exception_handler(job_runner.UploadLimitExceeded)
 async def _handle_limit_error(request, exc: job_runner.UploadLimitExceeded):  # pragma: no cover - FastAPI hooks
     summary = str(exc)
@@ -167,6 +177,50 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
     )
     job = job_store.get_job(job_id)
     return EnqueueUploadResponse(job=job)
+
+
+@app.post("/uploads/files", response_model=UploadFileResponse, status_code=HTTPStatus.CREATED)
+async def upload_workbook(file: UploadFile = File(...)) -> UploadFileResponse:
+    """Persist an uploaded workbook to the configured storage directory."""
+
+    original_filename = file.filename or ""
+    try:
+        validate_extension(original_filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
+
+    storage_dir = get_upload_storage_dir()
+    stored_path = generate_stored_path(original_filename, storage_dir=storage_dir)
+    resolved_limit = job_runner.resolve_file_size_limit(None)
+    total_bytes = 0
+    chunk_size = 1024 * 1024
+
+    try:
+        with stored_path.open("wb") as destination:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if resolved_limit is not None and total_bytes > resolved_limit:
+                    size_mb = total_bytes / (1024 * 1024)
+                    limit_mb = resolved_limit / (1024 * 1024)
+                    raise job_runner.UploadLimitExceeded(
+                        f"File size {size_mb:.1f} MiB exceeds limit of {limit_mb:.1f} MiB"
+                    )
+                destination.write(chunk)
+    except Exception:
+        if stored_path.exists():
+            stored_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    return UploadFileResponse(
+        stored_path=str(stored_path),
+        original_filename=get_original_filename(stored_path),
+        file_size=total_bytes,
+    )
 
 
 @app.get("/uploads/{job_id}", response_model=UploadJobDetailModel)
