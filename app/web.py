@@ -42,7 +42,25 @@ async def render_uploads_list(request: Request) -> HTMLResponse:
         jobs = []
         load_error = True
 
+    def _serialize_job(job: job_store.UploadJob) -> dict[str, str | None]:
+        def _format_dt(value):
+            return value.isoformat() if value else None
+
+        return {
+            "job_id": job.job_id,
+            "status": job.status,
+            "created_at": _format_dt(job.created_at),
+            "updated_at": _format_dt(job.updated_at),
+        }
+
+    initial_jobs = [_serialize_job(job) for job in jobs]
+
     return templates.TemplateResponse(
         "uploads/index.html",
-        {"request": request, "jobs": jobs, "load_error": load_error},
+        {
+            "request": request,
+            "jobs": jobs,
+            "initial_jobs": initial_jobs,
+            "load_error": load_error,
+        },
     )

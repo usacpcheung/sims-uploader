@@ -49,7 +49,7 @@
 {% endblock %}
 
 {% block scripts %}
-  <script id="initial-jobs" type="application/json">{{ jobs | tojson }}</script>
+  <script id="initial-jobs" type="application/json">{{ initial_jobs | tojson }}</script>
   <script>
     (function () {
       const table = document.querySelector('[data-uploads-table]');
