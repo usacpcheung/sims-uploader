@@ -14,8 +14,22 @@
           <p class="tagline">Manage and monitor SIMS upload jobs.</p>
         </div>
         <nav class="site-nav" aria-label="Primary">
-          <a href="{{ request.url_for('render_home') }}">Home</a>
-          <a href="{{ request.url_for('render_new_upload_form') }}">New Upload</a>
+          {% set current_path = request.url.path %}
+          <a
+            href="{{ request.url_for('render_home') }}"
+            class="{% if current_path == request.url_for('render_home') %}active{% endif %}"
+            >Home</a
+          >
+          <a
+            href="{{ request.url_for('render_uploads_list') }}"
+            class="{% if current_path == request.url_for('render_uploads_list') %}active{% endif %}"
+            >Uploads</a
+          >
+          <a
+            href="{{ request.url_for('render_new_upload_form') }}"
+            class="{% if current_path == request.url_for('render_new_upload_form') %}active{% endif %}"
+            >New Upload</a
+          >
         </nav>
       </div>
     </header>

@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}SIMS Uploader · Uploads{% endblock %}
+
+{% block content %}
+  <section class="panel">
+    <header class="panel__header">
+      <div>
+        <h2>Recent Uploads</h2>
+        <p class="muted">Monitor the most recent workbook uploads and their processing status.</p>
+      </div>
+    </header>
+
+    <div
+      class="table-wrapper"
+      data-fetch-url="{{ request.url_for('list_recent_uploads') }}"
+      data-load-error="{{ 'true' if load_error else 'false' }}"
+    >
+      <div class="table-state" data-loading-state hidden>Loading recent uploads…</div>
+      <div class="table-state table-state--error" data-error-state {% if not load_error %}hidden{% endif %}>
+        Unable to load uploads from the database. Trying again…
+      </div>
+      <div class="table-state table-state--empty" data-empty-state {% if jobs %}hidden{% endif %}>
+        No uploads have been queued yet. Start by creating a new upload.
+      </div>
+
+      <table class="data-table" data-uploads-table {% if not jobs %}hidden{% endif %}>
+        <thead>
+          <tr>
+            <th scope="col">Job ID</th>
+            <th scope="col">Status</th>
+            <th scope="col">Created</th>
+            <th scope="col">Updated</th>
+          </tr>
+        </thead>
+        <tbody data-uploads-table-body>
+          {% for job in jobs %}
+            <tr>
+              <td><code>{{ job.job_id }}</code></td>
+              <td class="status">{{ job.status }}</td>
+              <td>{{ job.created_at }}</td>
+              <td>{{ job.updated_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script id="initial-jobs" type="application/json">{{ jobs | tojson }}</script>
+  <script>
+    (function () {
+      const table = document.querySelector('[data-uploads-table]');
+      const tbody = document.querySelector('[data-uploads-table-body]');
+      const emptyState = document.querySelector('[data-empty-state]');
+      const loadingState = document.querySelector('[data-loading-state]');
+      const errorState = document.querySelector('[data-error-state]');
+      const fetchContainer = document.querySelector('[data-fetch-url]');
+      const fetchUrl = fetchContainer ? fetchContainer.dataset.fetchUrl : null;
+      const loadError = fetchContainer ? fetchContainer.dataset.loadError === 'true' : false;
+
+      const initialJobsEl = document.getElementById('initial-jobs');
+      let initialJobs = [];
+      try {
+        initialJobs = JSON.parse(initialJobsEl?.textContent || '[]') || [];
+      } catch (err) {
+        initialJobs = [];
+      }
+
+      if (errorState && loadError) {
+        errorState.dataset.showSticky = 'true';
+      }
+
+      function formatDate(value) {
+        if (!value) return '—';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return value;
+        }
+        return date.toLocaleString();
+      }
+
+      function setVisibility(element, isVisible) {
+        if (!element) return;
+        element.hidden = !isVisible;
+      }
+
+      function renderRows(jobs) {
+        if (!tbody) return;
+        tbody.innerHTML = '';
+        jobs.forEach((job) => {
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td><code>${job.job_id}</code></td>
+            <td class="status">${job.status ?? '—'}</td>
+            <td>${formatDate(job.created_at)}</td>
+            <td>${formatDate(job.updated_at)}</td>
+          `;
+          tbody.appendChild(row);
+        });
+      }
+
+      function renderState(jobs) {
+        setVisibility(table, jobs.length > 0);
+        setVisibility(emptyState, jobs.length === 0);
+        setVisibility(loadingState, false);
+        if (errorState && errorState.dataset.showSticky === 'true') {
+          setVisibility(errorState, true);
+        } else {
+          setVisibility(errorState, false);
+        }
+      }
+
+      function populateFrom(jobs) {
+        renderRows(jobs);
+        renderState(jobs);
+      }
+
+      async function fetchUploads() {
+        if (!fetchUrl) return;
+        setVisibility(loadingState, true);
+        setVisibility(errorState, false);
+        try {
+          const response = await fetch(fetchUrl);
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          const payload = await response.json();
+          populateFrom(Array.isArray(payload) ? payload : []);
+        } catch (err) {
+          if (errorState) {
+            errorState.dataset.showSticky = 'true';
+            setVisibility(errorState, true);
+          }
+        } finally {
+          setVisibility(loadingState, false);
+        }
+      }
+
+      populateFrom(initialJobs);
+      fetchUploads();
+    })();
+  </script>
+{% endblock %}
