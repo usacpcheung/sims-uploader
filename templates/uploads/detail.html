@@ -1,0 +1,348 @@
+{% extends "base.html" %}
+
+{% block title %}SIMS Uploader · Upload {{ job_id }}{% endblock %}
+
+{% block content %}
+  <section
+    class="panel"
+    data-detail-root
+    data-detail-url="{{ request.url_for('get_upload_job', job_id=job_id) }}"
+    data-events-url="{{ request.url_for('list_upload_events', job_id=job_id) }}"
+  >
+    <header class="panel__header">
+      <div>
+        <h2>Upload Job <code>{{ job_id }}</code></h2>
+        <p class="muted">Monitor processing status, workbook metadata, and ingestion results.</p>
+      </div>
+      <div class="form-actions">
+        <button class="primary-button" type="button" data-refresh-button>Refresh now</button>
+      </div>
+    </header>
+
+    <div class="alert alert--error" data-not-found hidden>
+      <strong>Job not found.</strong>
+      The requested upload job could not be located.
+      <a href="{{ request.url_for('render_uploads_list') }}">Return to uploads</a>.
+    </div>
+
+    <div class="alert alert--error" data-error hidden>
+      Unable to load the latest job details. Please try again in a moment.
+    </div>
+
+    <div class="table-state" data-loading>Loading upload details…</div>
+
+    <div class="job-layout" data-job-content hidden>
+      <section>
+        <h3>Status &amp; Metadata</h3>
+        <dl class="metadata-grid">
+          <div>
+            <dt>Status</dt>
+            <dd data-job-status>—</dd>
+          </div>
+          <div>
+            <dt>Workbook name</dt>
+            <dd data-workbook-name>—</dd>
+          </div>
+          <div>
+            <dt>Worksheet</dt>
+            <dd data-worksheet-name>—</dd>
+          </div>
+          <div>
+            <dt>Original filename</dt>
+            <dd data-original-filename>—</dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd data-created-at>—</dd>
+          </div>
+          <div>
+            <dt>Last updated</dt>
+            <dd data-updated-at>—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section>
+        <h3>Results</h3>
+        <div class="table-state" data-no-results>Results will appear after processing completes.</div>
+        <div data-results hidden>
+          <div class="result-grid">
+            <div>
+              <h4>Row counts</h4>
+              <dl>
+                <div><dt>Total</dt><dd data-total-rows>—</dd></div>
+                <div><dt>Processed</dt><dd data-processed-rows>—</dd></div>
+                <div><dt>Successful</dt><dd data-successful-rows>—</dd></div>
+                <div><dt>Rejected</dt><dd data-rejected-rows>—</dd></div>
+              </dl>
+            </div>
+            <div data-normalized-wrapper hidden>
+              <h4>Normalized output</h4>
+              <p>Normalized table: <code data-normalized-table>—</code></p>
+              <p data-rejected-link-wrapper hidden>
+                Rejected rows: <a data-rejected-link target="_blank" rel="noopener">Download</a>
+              </p>
+            </div>
+          </div>
+          <details data-coverage-wrapper hidden>
+            <summary>Coverage metadata</summary>
+            <pre data-coverage></pre>
+          </details>
+        </div>
+      </section>
+
+      <section>
+        <header class="panel__header">
+          <div>
+            <h3>Event timeline</h3>
+            <p class="muted">Entries are ordered from earliest to latest.</p>
+          </div>
+        </header>
+        <div class="table-state" data-events-empty>Loading events…</div>
+        <ol data-events-list hidden></ol>
+      </section>
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function () {
+      const root = document.querySelector('[data-detail-root]');
+      if (!root) return;
+
+      const detailUrl = root.dataset.detailUrl;
+      const eventsUrl = root.dataset.eventsUrl;
+
+      const loadingState = root.querySelector('[data-loading]');
+      const notFound = root.querySelector('[data-not-found]');
+      const errorBanner = root.querySelector('[data-error]');
+      const jobContent = root.querySelector('[data-job-content]');
+      const refreshButton = root.querySelector('[data-refresh-button]');
+
+      const statusEl = root.querySelector('[data-job-status]');
+      const workbookNameEl = root.querySelector('[data-workbook-name]');
+      const worksheetNameEl = root.querySelector('[data-worksheet-name]');
+      const originalFilenameEl = root.querySelector('[data-original-filename]');
+      const createdAtEl = root.querySelector('[data-created-at]');
+      const updatedAtEl = root.querySelector('[data-updated-at]');
+
+      const resultsContainer = root.querySelector('[data-results]');
+      const noResults = root.querySelector('[data-no-results]');
+      const totalRowsEl = root.querySelector('[data-total-rows]');
+      const processedRowsEl = root.querySelector('[data-processed-rows]');
+      const successfulRowsEl = root.querySelector('[data-successful-rows]');
+      const rejectedRowsEl = root.querySelector('[data-rejected-rows]');
+      const normalizedWrapper = root.querySelector('[data-normalized-wrapper]');
+      const normalizedTableEl = root.querySelector('[data-normalized-table]');
+      const rejectedLinkWrapper = root.querySelector('[data-rejected-link-wrapper]');
+      const rejectedLink = root.querySelector('[data-rejected-link]');
+      const coverageWrapper = root.querySelector('[data-coverage-wrapper]');
+      const coverageEl = root.querySelector('[data-coverage]');
+
+      const eventsEmpty = root.querySelector('[data-events-empty]');
+      const eventsList = root.querySelector('[data-events-list]');
+
+      let detailIntervalId = null;
+      let eventsIntervalId = null;
+      let currentStatus = '';
+
+      const TERMINAL_STATUSES = new Set(['Loaded', 'Errors']);
+
+      function setVisibility(element, isVisible) {
+        if (!element) return;
+        element.hidden = !isVisible;
+      }
+
+      function formatDate(value) {
+        if (!value) return '—';
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+          return value;
+        }
+        return parsed.toLocaleString();
+      }
+
+      function resetErrors() {
+        setVisibility(errorBanner, false);
+        if (errorBanner) {
+          errorBanner.textContent = 'Unable to load the latest job details. Please try again in a moment.';
+        }
+      }
+
+      function showNotFound() {
+        setVisibility(loadingState, false);
+        setVisibility(jobContent, false);
+        setVisibility(errorBanner, false);
+        setVisibility(notFound, true);
+        if (detailIntervalId) clearInterval(detailIntervalId);
+        if (eventsIntervalId) clearInterval(eventsIntervalId);
+      }
+
+      async function fetchJson(url) {
+        const response = await fetch(url);
+        if (response.status === 404) {
+          showNotFound();
+          throw new Error('Job not found');
+        }
+        if (!response.ok) {
+          throw new Error('Request failed');
+        }
+        return response.json();
+      }
+
+      function renderJob(data) {
+        const job = data?.job || {};
+        const result = data?.result || null;
+
+        statusEl.textContent = job.status || '—';
+        workbookNameEl.textContent = job.workbook_name || '—';
+        worksheetNameEl.textContent = job.worksheet_name || '—';
+        originalFilenameEl.textContent = job.original_filename || '—';
+        createdAtEl.textContent = formatDate(job.created_at);
+        updatedAtEl.textContent = formatDate(job.updated_at);
+
+        if (result) {
+          totalRowsEl.textContent = result.total_rows ?? '—';
+          processedRowsEl.textContent = result.processed_rows ?? '—';
+          successfulRowsEl.textContent = result.successful_rows ?? '—';
+          rejectedRowsEl.textContent = result.rejected_rows ?? '—';
+          setVisibility(resultsContainer, true);
+          setVisibility(noResults, false);
+
+          const normalizedName = result.normalized_table_name;
+          if (normalizedName) {
+            normalizedTableEl.textContent = normalizedName;
+            setVisibility(normalizedWrapper, true);
+          } else {
+            setVisibility(normalizedWrapper, false);
+          }
+
+          if (result.rejected_rows_path) {
+            rejectedLink.href = result.rejected_rows_path;
+            setVisibility(rejectedLinkWrapper, true);
+          } else {
+            setVisibility(rejectedLinkWrapper, false);
+          }
+
+          if (result.coverage_metadata) {
+            coverageEl.textContent = JSON.stringify(result.coverage_metadata, null, 2);
+            setVisibility(coverageWrapper, true);
+          } else {
+            setVisibility(coverageWrapper, false);
+          }
+        } else {
+          setVisibility(resultsContainer, false);
+          setVisibility(noResults, true);
+        }
+
+        currentStatus = job.status || '';
+      }
+
+      function renderEvents(events) {
+        if (!Array.isArray(events) || events.length === 0) {
+          setVisibility(eventsList, false);
+          setVisibility(eventsEmpty, true);
+          return;
+        }
+
+        const sorted = events.slice().sort((a, b) => {
+          const first = new Date(a.event_at).getTime();
+          const second = new Date(b.event_at).getTime();
+          if (Number.isNaN(first) || Number.isNaN(second)) {
+            return (a.event_id || 0) - (b.event_id || 0);
+          }
+          return first === second ? (a.event_id || 0) - (b.event_id || 0) : first - second;
+        });
+
+        eventsList.innerHTML = '';
+        sorted.forEach((event) => {
+          const item = document.createElement('li');
+          const message = event.message ? ` – ${event.message}` : '';
+          item.textContent = `${formatDate(event.event_at)} · ${event.status}${message}`;
+          eventsList.appendChild(item);
+        });
+
+        setVisibility(eventsList, true);
+        setVisibility(eventsEmpty, false);
+      }
+
+      function updatePolling() {
+        const isTerminal = TERMINAL_STATUSES.has(currentStatus);
+        if (isTerminal) {
+          if (detailIntervalId) {
+            clearInterval(detailIntervalId);
+            detailIntervalId = null;
+          }
+          if (eventsIntervalId) {
+            clearInterval(eventsIntervalId);
+            eventsIntervalId = null;
+          }
+          return;
+        }
+
+        if (!detailIntervalId) {
+          detailIntervalId = setInterval(() => {
+            loadDetail(true).catch(() => {});
+          }, 10000);
+        }
+
+        if (!eventsIntervalId) {
+          eventsIntervalId = setInterval(() => {
+            loadEvents(true).catch(() => {});
+          }, 5000);
+        }
+      }
+
+      async function loadDetail(skipLoadingToggle = false) {
+        if (!detailUrl) return;
+        resetErrors();
+        if (!skipLoadingToggle) {
+          setVisibility(loadingState, true);
+        }
+        try {
+          const payload = await fetchJson(detailUrl);
+          renderJob(payload);
+          setVisibility(jobContent, true);
+          setVisibility(loadingState, false);
+          updatePolling();
+        } catch (err) {
+          if (err && String(err).includes('not found')) {
+            return;
+          }
+          setVisibility(errorBanner, true);
+          setVisibility(loadingState, false);
+          console.error(err);
+        }
+      }
+
+      async function loadEvents(skipLoadingToggle = false) {
+        if (!eventsUrl) return;
+        if (!skipLoadingToggle) {
+          setVisibility(eventsEmpty, true);
+        }
+        try {
+          const payload = await fetchJson(eventsUrl);
+          renderEvents(payload);
+        } catch (err) {
+          if (err && String(err).includes('not found')) {
+            return;
+          }
+          setVisibility(errorBanner, true);
+          console.error(err);
+        }
+      }
+
+      function refreshAll() {
+        loadDetail();
+        loadEvents();
+      }
+
+      if (refreshButton) {
+        refreshButton.addEventListener('click', () => refreshAll());
+      }
+
+      refreshAll();
+    })();
+  </script>
+{% endblock %}

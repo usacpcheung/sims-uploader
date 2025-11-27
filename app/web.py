@@ -64,3 +64,16 @@ async def render_uploads_list(request: Request) -> HTMLResponse:
             "load_error": load_error,
         },
     )
+
+
+@router.get("/uploads/{job_id}", response_class=HTMLResponse)
+async def render_upload_detail(request: Request, job_id: str) -> HTMLResponse:
+    """Render details and event history for a single upload job."""
+
+    return templates.TemplateResponse(
+        "uploads/detail.html",
+        {
+            "request": request,
+            "job_id": job_id,
+        },
+    )

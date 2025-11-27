@@ -231,6 +231,36 @@ button.primary-button:focus {
   color: rgba(31, 41, 55, 0.75);
 }
 
+.job-layout section + section {
+  margin-top: 1.5rem;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.metadata-grid dt {
+  font-weight: 600;
+}
+
+.metadata-grid dd {
+  margin: 0.25rem 0 0;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+
+[data-events-list] {
+  padding-left: 1.25rem;
+  line-height: 1.8;
+}
+
 @media (prefers-color-scheme: dark) {
   .site-nav a.active {
     background-color: #c7d2fe;
