@@ -3,23 +3,40 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SIMS Uploader</title>
+    <title>{% block title %}SIMS Uploader{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}" />
   </head>
   <body>
     <header class="site-header">
-      <h1>SIMS Uploader</h1>
-      <p class="tagline">Manage and monitor SIMS upload jobs.</p>
+      <div class="site-header__inner">
+        <div>
+          <h1>SIMS Uploader</h1>
+          <p class="tagline">Manage and monitor SIMS upload jobs.</p>
+        </div>
+        <nav class="site-nav" aria-label="Primary">
+          {% set current_path = request.url.path %}
+          <a
+            href="{{ request.url_for('render_home') }}"
+            class="{% if current_path == request.url_for('render_home') %}active{% endif %}"
+            >Home</a
+          >
+          <a
+            href="{{ request.url_for('render_uploads_list') }}"
+            class="{% if current_path == request.url_for('render_uploads_list') %}active{% endif %}"
+            >Uploads</a
+          >
+          <a
+            href="{{ request.url_for('render_new_upload_form') }}"
+            class="{% if current_path == request.url_for('render_new_upload_form') %}active{% endif %}"
+            >New Upload</a
+          >
+        </nav>
+      </div>
     </header>
     <main>
-      <section class="panel">
-        <h2>Upload Pipeline</h2>
-        <p>
-          This interface provides a simple landing page for future monitoring tools
-          that will surface job status and processing metrics.
-        </p>
-      </section>
+      {% block content %}{% endblock %}
     </main>
     <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
+    {% block scripts %}{% endblock %}
   </body>
 </html>
