@@ -1,7 +1,7 @@
 # SIMS Data Uploader
 
 ## Overview
-SIMS Data Uploader converts messy MIS spreadsheets into normalized MariaDB tables while tracking every upload as a background job. The toolkit includes:
+SIMS Data Uploader converts messy SMIS spreadsheets into normalized MariaDB tables while tracking every upload as a background job. The toolkit includes:
 
 - A FastAPI service with REST endpoints for uploading binaries, enqueuing jobs, and polling progress.
 - A thin web UI (Jinja templates + static JS) that mirrors the API contract described in [`docs/web-ui.md`](docs/web-ui.md).
