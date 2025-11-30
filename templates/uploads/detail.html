@@ -19,9 +19,9 @@
       </div>
     </header>
 
-    <div class="alert alert--error" data-not-found hidden>
-      <strong>Job not found.</strong>
-      The requested upload job could not be located.
+    <div class="alert alert--error" data-not-found {% if not_found_message %}{% else %}hidden{% endif %}>
+      <strong>Upload job not available.</strong>
+      {{ not_found_message or "This upload job no longer exists." }}
       <a href="{{ request.url_for('render_uploads_list') }}">Return to uploads</a>.
     </div>
 
@@ -29,7 +29,7 @@
       Unable to load the latest job details. Please try again in a moment.
     </div>
 
-    <div class="table-state" data-loading>Loading upload details…</div>
+    <div class="table-state" data-loading {% if not_found_message %}hidden{% endif %}>Loading upload details…</div>
 
     <div class="job-layout" data-job-content hidden>
       <section>
@@ -175,20 +175,38 @@
         setVisibility(jobContent, false);
         setVisibility(errorBanner, false);
         setVisibility(notFound, true);
-        if (detailIntervalId) clearInterval(detailIntervalId);
-        if (eventsIntervalId) clearInterval(eventsIntervalId);
+        if (detailIntervalId) {
+          clearInterval(detailIntervalId);
+          detailIntervalId = null;
+        }
+        if (eventsIntervalId) {
+          clearInterval(eventsIntervalId);
+          eventsIntervalId = null;
+        }
+        if (refreshButton) {
+          refreshButton.disabled = true;
+        }
       }
 
       async function fetchJson(url) {
-        const response = await fetch(url);
-        if (response.status === 404) {
-          showNotFound();
-          throw new Error('Job not found');
+        try {
+          const response = await fetch(url);
+          if (response.status === 404) {
+            showNotFound();
+            throw new Error('Job not found');
+          }
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        } catch (err) {
+          if (err && String(err).includes('not found')) {
+            throw err;
+          }
+          setVisibility(errorBanner, true);
+          console.error(err);
+          throw err;
         }
-        if (!response.ok) {
-          throw new Error('Request failed');
-        }
-        return response.json();
       }
 
       function renderJob(data) {
@@ -334,6 +352,10 @@
       }
 
       function refreshAll() {
+        if (notFound && !notFound.hidden) {
+          showNotFound();
+          return;
+        }
         loadDetail();
         loadEvents();
       }
@@ -342,7 +364,11 @@
         refreshButton.addEventListener('click', () => refreshAll());
       }
 
-      refreshAll();
+      if (notFound && !notFound.hidden) {
+        showNotFound();
+      } else {
+        refreshAll();
+      }
     })();
   </script>
 {% endblock %}
