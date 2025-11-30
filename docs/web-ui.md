@@ -3,7 +3,9 @@
 This document captures the current contract between the browser-based uploader and
 the SIMS Upload API. It maps each screen to the supporting endpoint(s), describes
 the payloads that must be exchanged, and calls out how polling and error handling
-should behave so the front end remains aligned with the backend.
+should behave so the front end remains aligned with the backend. It also reflects
+the latest UI behavior (manual path entry, auto-filled metadata, queued notices,
+and revised polling cadence).
 
 ## Upload form
 
@@ -11,6 +13,8 @@ should behave so the front end remains aligned with the backend.
 * `POST /uploads/files` for streaming the workbook binary into the staging
   directory configured by `UPLOAD_STORAGE_DIR` (default `./uploads`).
 * `POST /uploads` for enqueueing the job with the persisted file path.
+* Manual path option: when operators already have the workbook on-disk beside the
+  API, the UI lets them skip the binary upload and supply a path directly.
 
 The upload form is responsible for collecting the metadata required to enqueue a
 new workbook. Flow:
@@ -22,20 +26,31 @@ new workbook. Flow:
    body defined by `EnqueueUploadRequest` to `POST /uploads`. Include the
    `file_size` reported by the staging response when available so the queue
    helper can reuse it for limit checks.
+3. If no file is uploaded, populate `workbook_path` directly via the “manual path”
+   input and submit `POST /uploads` without calling `/uploads/files`.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `workbook_path` | string | ✅ | `stored_path` returned by `POST /uploads/files`; no pre-positioned server path is required. The backend trims this to populate `original_filename`. |
+| `workbook_path` | string | ✅ | `stored_path` returned by `POST /uploads/files` **or** the path entered manually. The backend trims this to populate `original_filename`. |
 | `sheet` | string | ✅ | Worksheet tab to import. The worker defaults to `prep_excel.DEFAULT_SHEET` if omitted, but the API layer requires it. |
-| `source_year` | string | ✅ | Stored with the job payload so downstream normalization can enforce year-specific rules. |
+| `source_year` | string | ✅ | Stored with the job payload so downstream normalization can enforce year-specific rules. Defaults to the current calendar year in the UI. |
 | `workbook_type` | string | ❌ | Defaults to `"default"`; expose a select when alternative pipelines exist. |
 | `batch_id` | string | ❌ | Associates multiple uploads with a batch. |
-| `workbook_name` | string | ❌ | Human-friendly workbook label surfaced in job listings. |
+| `workbook_name` | string | ❌ | Human-friendly workbook label surfaced in job listings. Auto-filled from the uploaded filename when blank. |
 | `worksheet_name` | string | ❌ | Friendly sheet label surfaced in job listings. |
-| `file_size` | integer | ❌ | Bytes. Populate with the size returned by `POST /uploads/files` so limit enforcement can happen synchronously and surface as `400` errors. |
+| `file_size` | integer | ❌ | Bytes. Populate with the size returned by `POST /uploads/files` (or the HTML file metadata) so limit enforcement can happen synchronously and surface as `400` errors. |
 | `row_count` | integer | ❌ | Used by the queue helper for preflight limit checks. |
 | `max_file_size` | integer | ❌ | Optional override for instance-wide limit. Leave blank to rely on defaults. |
 | `max_rows` | integer | ❌ | Optional override for maximum row count. |
+
+### Client-side validation and defaults
+
+* Users must either select a workbook file **or** provide a manual path; submitting
+  without one of these options shows inline guidance near the manual path field.
+* `source_year` defaults to the current year when empty; `workbook_type` defaults
+  to `default`.
+* When a file is chosen, the UI mirrors metadata into the form (`workbook_name`
+  and `file_size`) using the HTML `File` object or the `/uploads/files` response.
 
 **Successful submission** returns `202 Accepted` and an `EnqueueUploadResponse`
 containing the created job model. Use `job.job_id` to navigate to the job detail
@@ -63,27 +78,31 @@ an optional `limit` query parameter (default 20, maximum 100) and returns an arr
 of `UploadJobModel` objects:
 
 * `job_id` – stable identifier used for routing to detail pages.
-* `original_filename` – displayed in the table and used when no friendly name is
-  provided.
-* `workbook_name`, `worksheet_name` – optional friendly labels; fall back to
-  filename when missing.
-* `file_size` – bytes; render using a human-readable formatter when present.
 * `status` – possible values today include `Queued`, `Parsing`, `Validating`,
   `Loaded`, and `Errors` (from `job_store.mark_*`).
-* `created_at`, `updated_at` – use `updated_at` to drive the “last updated” column
-  and `created_at` for initial ordering.
+* `created_at`, `updated_at` – rendered as local timestamps. The current UI table
+  focuses on these columns and the job ID; friendly names and sizes are available
+  in the API payload for richer tables later.
 
 ### Refresh cadence
 
-Poll `GET /uploads` every **30 seconds** while the list view is mounted. If the
-user manually refreshes, reuse the same endpoint with the current `limit` value.
+Poll `GET /uploads` every **12 seconds** while the list view is mounted. A manual
+“Refresh now” button forces an immediate fetch using the same endpoint and limit
+value.
+
+### Queued notice
+
+After a successful job enqueue, the UI redirects back to the list with
+`?notice=<message>&job_id=<id>`. The list page surfaces this banner until the
+user dismisses it, then removes the query parameters via `replaceState`.
 
 ### Empty and error states
 
 * When no jobs are returned, show an empty state encouraging the user to upload a
   workbook.
-* For non-`404` errors (network issues, 5xx, malformed responses), display a toast
-  and pause polling for one interval before retrying.
+* For non-`404` errors (network issues, 5xx, malformed responses), surface an
+  inline error block and keep the current jobs rendered; the next poll attempts to
+  recover automatically.
 
 ## Job detail & event timeline
 
