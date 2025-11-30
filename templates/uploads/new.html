@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+
+{% block title %}SIMS Uploader · New Upload{% endblock %}
+
+{% block content %}
+  <section class="panel">
+    <h2>Enqueue a new upload</h2>
+    <p>
+      Provide workbook details and optional limits to enqueue a new upload job.
+    </p>
+    <div id="form-errors" class="alert alert--error" role="alert" hidden></div>
+    <form
+      id="upload-form"
+      class="form-grid"
+      novalidate
+      data-enqueue-url="{{ request.url_for('create_upload_job') }}"
+      data-upload-url="{{ request.url_for('upload_workbook') }}"
+      data-job-detail-url="{{ request.url_for('get_upload_job', job_id='__JOB_ID__') }}"
+    >
+      <div class="field-group">
+        <label for="workbook_file">Workbook file</label>
+        <input type="file" id="workbook_file" name="workbook_file" />
+        <p class="field-help">Choose a workbook to upload and stage automatically.</p>
+      </div>
+
+      <input type="hidden" id="workbook_path" name="workbook_path" autocomplete="off" />
+
+      <div class="field-group">
+        <label for="manual_workbook_path">Workbook path (manual entry)</label>
+        <input
+          type="text"
+          id="manual_workbook_path"
+          name="manual_workbook_path"
+          autocomplete="off"
+          placeholder="\\\path\to\workbook.xlsx"
+        />
+        <p class="field-help">Leave blank when uploading a file; provide a path to enqueue without uploading.</p>
+      </div>
+
+      <div class="field-group">
+        <label for="workbook_name">Workbook name</label>
+        <input
+          type="text"
+          id="workbook_name"
+          name="workbook_name"
+          autocomplete="off"
+          placeholder="Workbook display name"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="sheet">Sheet<span aria-hidden="true"> *</span></label>
+        <input
+          type="text"
+          id="sheet"
+          name="sheet"
+          required
+          autocomplete="off"
+          placeholder="Worksheet reference"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="worksheet_name">Worksheet name</label>
+        <input
+          type="text"
+          id="worksheet_name"
+          name="worksheet_name"
+          autocomplete="off"
+          placeholder="Optional worksheet name override"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="source_year">Source year<span aria-hidden="true"> *</span></label>
+        <input
+          type="text"
+          id="source_year"
+          name="source_year"
+          required
+          autocomplete="off"
+          placeholder="2024"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="workbook_type">Workbook type</label>
+        <input
+          type="text"
+          id="workbook_type"
+          name="workbook_type"
+          value="default"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="field-group">
+        <label for="batch_id">Batch ID</label>
+        <input type="text" id="batch_id" name="batch_id" autocomplete="off" />
+      </div>
+
+      <div class="field-group">
+        <label for="file_size">File size (bytes)</label>
+        <input type="number" id="file_size" name="file_size" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="row_count">Row count</label>
+        <input type="number" id="row_count" name="row_count" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="max_file_size">Max file size (bytes)</label>
+        <input type="number" id="max_file_size" name="max_file_size" min="0" step="1" />
+      </div>
+
+      <div class="field-group">
+        <label for="max_rows">Max rows</label>
+        <input type="number" id="max_rows" name="max_rows" min="0" step="1" />
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" class="primary-button">Submit upload job</button>
+        <span id="form-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function () {
+      const form = document.getElementById('upload-form');
+      if (!form) {
+        return;
+      }
+
+      const errorBox = document.getElementById('form-errors');
+      const statusBox = document.getElementById('form-status');
+      const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
+      const enqueueUrl = form.dataset.enqueueUrl;
+      const uploadUrl = form.dataset.uploadUrl;
+      const jobDetailUrlTemplate = form.dataset.jobDetailUrl;
+      const workbookFileInput = document.getElementById('workbook_file');
+      const workbookPathField = document.getElementById('workbook_path');
+      const manualPathField = document.getElementById('manual_workbook_path');
+      const workbookNameField = document.getElementById('workbook_name');
+      const fileSizeField = document.getElementById('file_size');
+
+      if (!enqueueUrl || !jobDetailUrlTemplate) {
+        console.error('Upload form is missing required URL data attributes.');
+        return;
+      }
+
+      function resetFeedback() {
+        if (errorBox) {
+          errorBox.hidden = true;
+          errorBox.textContent = '';
+        }
+        if (statusBox) {
+          statusBox.textContent = '';
+        }
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        resetFeedback();
+
+        const submitButton = form.querySelector('button[type="submit"]');
+        if (submitButton) {
+          submitButton.disabled = true;
+        }
+
+        const selectedFile = workbookFileInput?.files?.[0] || null;
+        const manualPath = (manualPathField?.value || '').trim();
+
+        if (!selectedFile && !manualPath) {
+          if (errorBox) {
+            errorBox.textContent = 'Choose a workbook file to upload or provide a workbook path.';
+            errorBox.hidden = false;
+          }
+          if (statusBox) {
+            statusBox.textContent = '';
+          }
+          if (submitButton) {
+            submitButton.disabled = false;
+          }
+          return;
+        }
+
+        if (workbookPathField) {
+          workbookPathField.value = '';
+        }
+
+        if (selectedFile) {
+          if (!uploadUrl) {
+            console.error('Upload form is missing the upload URL data attribute.');
+            if (statusBox) {
+              statusBox.textContent = '';
+            }
+            if (submitButton) {
+              submitButton.disabled = false;
+            }
+            return;
+          }
+
+          if (statusBox) {
+            statusBox.textContent = 'Uploading workbook…';
+          }
+
+          const uploadFormData = new FormData();
+          uploadFormData.append('file', selectedFile);
+
+          try {
+            const uploadResponse = await fetch(uploadUrl, {
+              method: 'POST',
+              body: uploadFormData
+            });
+
+            const uploadContentType = uploadResponse.headers.get('content-type');
+            const uploadIsJson = uploadContentType && uploadContentType.includes('application/json');
+            const uploadData = uploadIsJson ? await uploadResponse.json() : null;
+
+            if (uploadResponse.status !== 201 || !uploadData || !uploadData.stored_path) {
+              const detail = uploadData?.detail || 'Failed to stage workbook file.';
+              throw new Error(detail);
+            }
+
+            if (workbookPathField) {
+              workbookPathField.value = uploadData.stored_path;
+            }
+            if (fileSizeField && !fileSizeField.value) {
+              const resolvedSize = uploadData.file_size || selectedFile.size;
+              if (resolvedSize) {
+                fileSizeField.value = resolvedSize;
+              }
+            }
+            if (workbookNameField && !workbookNameField.value) {
+              const resolvedName = uploadData.original_filename || selectedFile.name;
+              if (resolvedName) {
+                workbookNameField.value = resolvedName;
+              }
+            }
+
+            if (statusBox) {
+              statusBox.textContent = 'Enqueuing upload request…';
+            }
+          } catch (error) {
+            if (errorBox) {
+              errorBox.textContent = error instanceof Error ? error.message : 'Failed to upload workbook file.';
+              errorBox.hidden = false;
+            }
+            if (statusBox) {
+              statusBox.textContent = '';
+            }
+            if (submitButton) {
+              submitButton.disabled = false;
+            }
+            return;
+          }
+        } else if (workbookPathField) {
+          workbookPathField.value = manualPath;
+          if (statusBox) {
+            statusBox.textContent = 'Submitting upload request…';
+          }
+        }
+
+        const formData = new FormData(form);
+        const payload = {};
+        for (const [key, value] of formData.entries()) {
+          if (key === 'workbook_file' || key === 'manual_workbook_path') {
+            continue;
+          }
+          if (value === '') {
+            payload[key] = null;
+            continue;
+          }
+          if (numberFields.has(key)) {
+            payload[key] = Number(value);
+          } else {
+            payload[key] = value;
+          }
+        }
+
+        try {
+          const response = await fetch(enqueueUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+
+          const contentType = response.headers.get('content-type');
+          const isJson = contentType && contentType.includes('application/json');
+          const data = isJson ? await response.json() : null;
+
+          if (response.status === 202 && data && data.job && data.job.job_id) {
+            if (statusBox) {
+              statusBox.textContent = 'Upload queued! Redirecting to job details…';
+            }
+            const jobId = data.job.job_id;
+            const jobDetailUrl = jobDetailUrlTemplate.replace(
+              '__JOB_ID__',
+              encodeURIComponent(jobId)
+            );
+            window.location.assign(jobDetailUrl);
+            return;
+          }
+
+          if (response.status === 400 && data) {
+            const messages = [data.detail, data.validation_summary].filter(Boolean);
+            if (errorBox) {
+              errorBox.textContent = messages.join(' — ');
+              errorBox.hidden = false;
+            }
+            if (statusBox) {
+              statusBox.textContent = '';
+            }
+            return;
+          }
+
+          throw new Error('Unexpected response from server');
+        } catch (error) {
+          if (errorBox) {
+            errorBox.textContent = error instanceof Error ? error.message : 'Failed to submit request';
+            errorBox.hidden = false;
+          }
+          if (statusBox) {
+            statusBox.textContent = '';
+          }
+        } finally {
+          const submitButton = form.querySelector('button[type="submit"]');
+          if (submitButton) {
+            submitButton.disabled = false;
+          }
+        }
+      });
+    })();
+  </script>
+{% endblock %}
