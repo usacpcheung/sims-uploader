@@ -56,11 +56,19 @@ cd sims-uploader
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # populate DB host/user/password/database
+cp .env.example .env  # populate DB host/user/password/database + Redis settings
 mkdir -p uploads      # optional workspace for raw spreadsheets
 ```
 All CLI entrypoints read credentials through `app.config.get_db_settings()`, so keep secrets inside `.env` rather than source
-files.
+files. Add Redis configuration, queue limits, and upload storage configuration alongside database credentials:
+
+```
+REDIS_URL=redis://localhost:6379/0
+UPLOAD_QUEUE_NAME=sims_uploads         # optional override for the queue name
+UPLOAD_MAX_FILE_SIZE_BYTES=104857600   # 100 MiB default; adjust per deployment
+UPLOAD_MAX_ROWS=500000                 # Reject uploads reporting more rows than this limit
+UPLOAD_STORAGE_DIR=/var/lib/sims-uploads  # Optional; defaults to ./uploads when unset
+```
 
 ## Database Setup
 1. Create the schema and source the base SQL scripts:
@@ -84,38 +92,56 @@ files.
    MySQL clients such as `SOURCE` and keeps sequencing explicit.
 
 ## Command-Line Workflows
-### 1. Preprocess Excel Workbooks
+### 0. Queue Upload Jobs
 ```bash
+python -m app.pipeline uploads/your_file.xlsx --source-year 2024
+```
+- Creates an entry in `upload_jobs`, enforces size/row limits, and enqueues the payload for background processing.
+- Accepts the same worksheet and workbook type arguments as the legacy CLI but returns immediately with an RQ job id.
+
+Start a worker in another terminal to drain the queue:
+
+```bash
+python -m app.job_runner worker
+```
+- Reads `REDIS_URL`/`UPLOAD_QUEUE_NAME` (or `--redis-url`/`--queue` overrides) to connect to Redis.
+- Logs receipt of `SIGTERM`/`SIGINT` and requests a graceful shutdown after the current job finishes, ensuring the queue drains cleanly.
+
+### 1. Preprocess Excel Workbooks
+- ```bash
 python -m app.prep_excel uploads/your_file.xlsx
 ```
 - Cleans header rows, drops empty columns, and aligns column order with the target staging table.
 - Hashes the workbook to prevent duplicate ingestion and appends the hash to the generated CSV filename.
 - Validates presence of required columns declared in `sheet_ingest_config`. Missing headers raise a
   `MissingColumnsError` (or exit with code `2` when run via CLI) so calling services can surface actionable feedback.
+- The CLI defaults to the `"default"` workbook type; ensure any workbook configuration intended for CLI use also inserts a
+  matching `"default"` row (or always invoke the CLI with an explicit `--workbook-type`).
 
-### 2. Bulk Load Normalized Data
+### 2. Bulk Load Normalized Data (Legacy)
 ```bash
 python -m app.ingest_excel uploads/your_file.xlsx TEACH_RECORD --source-year 2024
 ```
 - Skips work when the workbook hash already exists in the staging table.
 - Loads the CSV through `LOAD DATA LOCAL INFILE`, populating metadata columns inside a single transaction.
 - Accepts optional `--batch-id` and `--ingested-at` overrides for advanced scheduling workflows.
+- Use this path for ad-hoc recovery; the recommended production flow is to queue jobs and let workers orchestrate ingestion.
 
 ### 3. Track Upload Progress
-`app.job_store` exposes helpers that open short-lived PyMySQL connections using the same configuration as the CLI tools:
+`app.job_store` exposes helpers that open short-lived PyMySQL connections using the same configuration as the CLI tools. The
+new `app.job_runner.enqueue_job` helper wraps job creation + queueing when you need to schedule uploads from another service:
 ```python
-from app import job_store
+import os
 
-job = job_store.create_job(filename="uploads/your_file.xlsx", workbook_type="TEACH_RECORD")
-job = job_store.set_status(job.job_id, status="processing", message="Queued for load")
-results = job_store.record_results(
-    job_id=job.job_id,
-    processed_rows=1245,
-    inserted_rows=1245,
-    normalized_table="teach_record_raw",
-    coverage={"grade_levels": ["S1", "S2"]},
+from app import job_runner
+
+job_id, rq_job = job_runner.enqueue_job(
+    workbook_path="uploads/your_file.xlsx",
+    sheet="TEACH_RECORD",
+    source_year="2024",
+    file_size=os.path.getsize("uploads/your_file.xlsx"),
 )
-job_store.save_rejected_rows_path(job.job_id, "/path/to/rejected_rows.csv")
+print("Queued job", job_id, "RQ id", rq_job.id)
 ```
 - Every status change records an event row, making it easy to drive dashboards or alerting.
 - Helpers return dataclasses populated from the database so timestamps, default values, and computed fields are readily available.
@@ -128,11 +154,30 @@ pytest
 The suite currently focuses on the job store to guarantee SQL parameters, transaction boundaries, and JSON serialization are
 stable. Additional tests will be added as more ingest pipelines and APIs come online.
 
+## API Service
+- Start the FastAPI application with Uvicorn:
+  ```bash
+  uvicorn app.api:app --reload
+  ```
+- `POST /uploads/files` is the staging endpoint for raw workbook binaries. It validates the extension, enforces the file-size
+  limit (`UPLOAD_MAX_FILE_SIZE_BYTES`), and persists the file under `UPLOAD_STORAGE_DIR` (default `./uploads`). The response
+  includes the generated `stored_path`, which should be passed to `POST /uploads` as `workbook_path`.
+- `POST /uploads` mirrors the CLI queue helper and enforces the same file-size/row-count hints before scheduling work.
+- `GET /uploads/{job_id}`, `/uploads/{job_id}/events`, and `GET /uploads` expose the job store helpers for dashboards or CLI tooling to poll upload progress.
+
+Browser and other interactive clients should upload files directly via `/uploads/files` instead of relying on server-visible
+paths. The UI now performs this two-step process (file upload ➜ job enqueue) so operators do not need to pre-position
+workbooks on disk.
+
 ## Operational Notes
 - The repository ignores `.xlsx`, `.csv`, `.env`, and everything inside `uploads/`; never commit real student or teacher data.
 - Always configure MariaDB with `utf8mb4` to handle Chinese characters, emoji, and future multilingual content.
 - Ensure `local_infile` is enabled on both server and client connections so `LOAD DATA LOCAL INFILE` operates correctly.
 - Rotate database credentials periodically and share `.env` values securely.
+- Housekeeping: the upload storage directory (`UPLOAD_STORAGE_DIR` or `./uploads`) is append-only. Schedule periodic cleanup
+  of staged files after they have been ingested to reclaim space. Size the volume based on `UPLOAD_MAX_FILE_SIZE_BYTES`,
+  expected concurrency on `UPLOAD_QUEUE_NAME`, and the configured `UPLOAD_MAX_ROWS` so temporary storage does not exhaust the
+  host.
 
 ## Roadmap
 1. **Additional workbook types** – attendance, activities, awards, and counseling records with dedicated staging tables.
