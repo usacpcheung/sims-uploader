@@ -1,4 +1,10 @@
-"""Helpers for interacting with upload job tracking tables."""
+"""Helpers for interacting with upload job tracking tables.
+
+In addition to the mutation helpers, this module now exposes read helpers such
+as :func:`get_job`, :func:`list_job_events`, :func:`get_job_result`, and
+:func:`list_recent_jobs`.  They support the Step 8 inspection workflow so
+services do not need to reimplement bespoke SQL for common lookups.
+"""
 
 from __future__ import annotations
 
@@ -104,6 +110,110 @@ def _dict_to_upload_job_result(row: Mapping[str, Any] | None) -> UploadJobResult
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def get_job(job_id: str, *, db_settings: Mapping[str, Any] | None = None) -> UploadJob:
+    """Fetch a single upload job by ``job_id``."""
+
+    connection = _connect(db_settings)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                "SELECT * FROM `upload_jobs` WHERE job_id = %s",
+                (job_id,),
+            )
+            job_row = cursor.fetchone()
+    finally:
+        connection.close()
+
+    if job_row is None:
+        raise ValueError(f"Upload job {job_id} not found")
+
+    return _dict_to_upload_job(job_row)
+
+
+def list_job_events(
+    job_id: str,
+    *,
+    limit: int | None = None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> list[UploadJobEvent]:
+    """Return events for an upload job ordered chronologically."""
+
+    connection = _connect(db_settings)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                "SELECT 1 FROM `upload_jobs` WHERE job_id = %s",
+                (job_id,),
+            )
+            if cursor.fetchone() is None:
+                raise ValueError(f"Upload job {job_id} not found")
+
+            query = (
+                "SELECT * FROM `upload_job_events` WHERE job_id = %s "
+                "ORDER BY `event_at` ASC, `event_id` ASC"
+            )
+            params: list[Any] = [job_id]
+            if limit is not None:
+                query += " LIMIT %s"
+                params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    return [_dict_to_upload_job_event(row) for row in rows]
+
+
+def get_job_result(
+    job_id: str, *, db_settings: Mapping[str, Any] | None = None
+) -> UploadJobResult:
+    """Fetch the stored results for an upload job."""
+
+    connection = _connect(db_settings)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                "SELECT * FROM `upload_job_results` WHERE job_id = %s",
+                (job_id,),
+            )
+            result_row = cursor.fetchone()
+    finally:
+        connection.close()
+
+    if result_row is None:
+        raise ValueError(f"Upload job results for {job_id} not found")
+
+    return _dict_to_upload_job_result(result_row)
+
+
+def list_recent_jobs(
+    *,
+    limit: int = 20,
+    db_settings: Mapping[str, Any] | None = None,
+) -> list[UploadJob]:
+    """List the most recently created jobs for dashboards or Step 8 inspection."""
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+
+    connection = _connect(db_settings)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                (
+                    "SELECT * FROM `upload_jobs` "
+                    "ORDER BY `created_at` DESC, `job_id` DESC LIMIT %s"
+                ),
+                (limit,),
+            )
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    return [_dict_to_upload_job(row) for row in rows]
 
 
 def create_job(

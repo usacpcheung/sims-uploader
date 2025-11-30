@@ -17,6 +17,7 @@ class CursorStub:
         *,
         rowcount=1,
         fetchone_results=None,
+        fetchall_results=None,
         lastrowid=0,
         exception=None,
     ):
@@ -24,6 +25,7 @@ class CursorStub:
         self.rowcount = rowcount
         self.lastrowid = lastrowid
         self._fetchone_results = list(fetchone_results or [])
+        self._fetchall_results = list(fetchall_results or [])
         self._exception = exception
 
     def __enter__(self):
@@ -45,6 +47,13 @@ class CursorStub:
         if self._fetchone_results:
             return self._fetchone_results.pop(0)
         return None
+
+    def fetchall(self):
+        if self._exception:
+            raise self._exception
+        results = list(self._fetchall_results)
+        self._fetchall_results.clear()
+        return results
 
 
 class ConnectionStub:
@@ -82,6 +91,208 @@ def patch_db_settings(monkeypatch):
 
 def _set_connection(monkeypatch, connection):
     monkeypatch.setattr(job_store, "_connect", lambda overrides=None: connection)
+
+
+def test_get_job_fetches_single_job(monkeypatch):
+    job_id = "job"
+    executed_dict = []
+    job_row = {
+        "job_id": job_id,
+        "original_filename": "file.csv",
+        "workbook_name": None,
+        "worksheet_name": None,
+        "file_size": None,
+        "status": "pending",
+        "created_at": datetime(2024, 1, 1, 12, 0, 0),
+        "updated_at": datetime(2024, 1, 1, 12, 1, 0),
+    }
+    connection = ConnectionStub(
+        {
+            job_store.pymysql.cursors.DictCursor: [
+                CursorStub(executed_dict, fetchone_results=[job_row])
+            ]
+        }
+    )
+    _set_connection(monkeypatch, connection)
+
+    job = job_store.get_job(job_id)
+
+    assert executed_dict == [("SELECT * FROM `upload_jobs` WHERE job_id = %s", (job_id,))]
+    assert job == job_store.UploadJob(**job_row)
+    assert connection.closed is True
+
+
+def test_get_job_missing_raises(monkeypatch):
+    executed_dict = []
+    connection = ConnectionStub(
+        {job_store.pymysql.cursors.DictCursor: [CursorStub(executed_dict)]}
+    )
+    _set_connection(monkeypatch, connection)
+
+    with pytest.raises(ValueError) as excinfo:
+        job_store.get_job("missing")
+
+    assert "Upload job missing not found" in str(excinfo.value)
+    assert executed_dict == [("SELECT * FROM `upload_jobs` WHERE job_id = %s", ("missing",))]
+
+
+def test_list_job_events_orders_and_limits(monkeypatch):
+    job_id = "job"
+    executed_dict = []
+    event_rows = [
+        {
+            "event_id": 1,
+            "job_id": job_id,
+            "status": "Pending",
+            "message": "queued",
+            "event_at": datetime(2024, 1, 1, 12, 0, 0),
+        },
+        {
+            "event_id": 2,
+            "job_id": job_id,
+            "status": "Parsing",
+            "message": "started",
+            "event_at": datetime(2024, 1, 1, 12, 5, 0),
+        },
+    ]
+    connection = ConnectionStub(
+        {
+            job_store.pymysql.cursors.DictCursor: [
+                CursorStub(
+                    executed_dict,
+                    fetchone_results=[{"exists": 1}],
+                    fetchall_results=event_rows,
+                )
+            ]
+        }
+    )
+    _set_connection(monkeypatch, connection)
+
+    events = job_store.list_job_events(job_id, limit=5)
+
+    assert executed_dict == [
+        ("SELECT 1 FROM `upload_jobs` WHERE job_id = %s", (job_id,)),
+        (
+            "SELECT * FROM `upload_job_events` WHERE job_id = %s ORDER BY `event_at` ASC, `event_id` ASC LIMIT %s",
+            (job_id, 5),
+        ),
+    ]
+    assert events == [job_store.UploadJobEvent(**row) for row in event_rows]
+
+
+def test_list_job_events_missing_job(monkeypatch):
+    executed_dict = []
+    connection = ConnectionStub(
+        {job_store.pymysql.cursors.DictCursor: [CursorStub(executed_dict)]}
+    )
+    _set_connection(monkeypatch, connection)
+
+    with pytest.raises(ValueError) as excinfo:
+        job_store.list_job_events("missing")
+
+    assert "Upload job missing not found" in str(excinfo.value)
+    assert executed_dict == [("SELECT 1 FROM `upload_jobs` WHERE job_id = %s", ("missing",))]
+
+
+def test_get_job_result_fetches(monkeypatch):
+    job_id = "job"
+    executed_dict = []
+    result_row = {
+        "job_id": job_id,
+        "total_rows": 10,
+        "processed_rows": 9,
+        "successful_rows": 8,
+        "rejected_rows": 1,
+        "normalized_table_name": "table",
+        "rejected_rows_path": None,
+        "coverage_metadata": None,
+        "created_at": datetime(2024, 1, 1, 12, 0, 0),
+        "updated_at": datetime(2024, 1, 1, 12, 5, 0),
+    }
+    connection = ConnectionStub(
+        {
+            job_store.pymysql.cursors.DictCursor: [
+                CursorStub(executed_dict, fetchone_results=[result_row])
+            ]
+        }
+    )
+    _set_connection(monkeypatch, connection)
+
+    result = job_store.get_job_result(job_id)
+
+    assert executed_dict == [
+        ("SELECT * FROM `upload_job_results` WHERE job_id = %s", (job_id,))
+    ]
+    assert result == job_store.UploadJobResult(**result_row)
+
+
+def test_get_job_result_missing(monkeypatch):
+    executed_dict = []
+    connection = ConnectionStub(
+        {job_store.pymysql.cursors.DictCursor: [CursorStub(executed_dict)]}
+    )
+    _set_connection(monkeypatch, connection)
+
+    with pytest.raises(ValueError) as excinfo:
+        job_store.get_job_result("missing")
+
+    assert "Upload job results for missing not found" in str(excinfo.value)
+    assert executed_dict == [
+        ("SELECT * FROM `upload_job_results` WHERE job_id = %s", ("missing",))
+    ]
+
+
+def test_list_recent_jobs_returns_latest(monkeypatch):
+    executed_dict = []
+    job_rows = [
+        {
+            "job_id": "b",
+            "original_filename": "b.csv",
+            "workbook_name": None,
+            "worksheet_name": None,
+            "file_size": None,
+            "status": "pending",
+            "created_at": datetime(2024, 1, 1, 12, 5, 0),
+            "updated_at": datetime(2024, 1, 1, 12, 6, 0),
+        },
+        {
+            "job_id": "a",
+            "original_filename": "a.csv",
+            "workbook_name": None,
+            "worksheet_name": None,
+            "file_size": None,
+            "status": "pending",
+            "created_at": datetime(2024, 1, 1, 12, 0, 0),
+            "updated_at": datetime(2024, 1, 1, 12, 1, 0),
+        },
+    ]
+    connection = ConnectionStub(
+        {
+            job_store.pymysql.cursors.DictCursor: [
+                CursorStub(executed_dict, fetchall_results=job_rows)
+            ]
+        }
+    )
+    _set_connection(monkeypatch, connection)
+
+    jobs = job_store.list_recent_jobs(limit=2)
+
+    assert executed_dict == [
+        (
+            "SELECT * FROM `upload_jobs` ORDER BY `created_at` DESC, `job_id` DESC LIMIT %s",
+            (2,),
+        )
+    ]
+    assert jobs == [job_store.UploadJob(**row) for row in job_rows]
+
+
+def test_list_recent_jobs_requires_positive_limit(monkeypatch):
+    _set_connection(monkeypatch, ConnectionStub({}))
+
+    with pytest.raises(ValueError) as excinfo:
+        job_store.list_recent_jobs(limit=0)
+
+    assert "limit must be positive" in str(excinfo.value)
 
 
 def test_create_job_inserts_and_returns_job(monkeypatch):

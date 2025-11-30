@@ -470,6 +470,7 @@ def _fetch_table_columns(
         if settings is not None
         else (_normalise_db_settings(db_settings) if db_settings is not None else dict(DB))
     )
+    rows: list[Mapping[str, object]]
     try:
         with connection.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(
@@ -489,6 +490,9 @@ def _fetch_table_columns(
     finally:
         if owns_connection:
             connection.close()
+
+    if not rows:
+        raise TableMissingError(table_name)
 
     return [
         {
