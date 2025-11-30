@@ -119,6 +119,13 @@ main {
   font-size: 1rem;
 }
 
+.checkbox {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-weight: 600;
+}
+
 .form-actions {
   display: flex;
   gap: 1rem;
@@ -241,6 +248,27 @@ button.primary-button:focus {
   gap: 1rem;
 }
 
+.pill-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pill-list li,
+.pill-list div {
+  background-color: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  font-weight: 600;
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
 .metadata-grid dt {
   font-weight: 600;
 }
@@ -292,5 +320,11 @@ button.primary-button:focus {
 
   .table-state--error {
     color: #fecaca;
+  }
+
+  .pill-list li,
+  .pill-list div {
+    background-color: rgba(99, 102, 241, 0.35);
+    color: #e0e7ff;
   }
 }

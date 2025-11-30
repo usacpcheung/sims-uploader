@@ -13,8 +13,10 @@ os.environ.setdefault("DB_CHARSET", "utf8mb4")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
+import pandas as pd
 import pytest
 
+from io import BytesIO
 from pathlib import Path
 
 from app import api, config, job_runner, job_store
@@ -198,6 +200,41 @@ def test_upload_flow_stages_then_enqueues(monkeypatch, staged_upload):
     assert captured["file_size"] == staging_payload["file_size"]
     assert captured["workbook_name"] == staging_payload["original_filename"]
     assert captured["sheet"] == "Sheet A"
+
+
+def test_config_preview_detects_headers(monkeypatch):
+    client = TestClient(api.app)
+    dataframe = pd.DataFrame(
+        [
+            {"raw_id": 1, "姓名": "Alice", "日期": "2024-01-01"},
+            {"raw_id": 2, "姓名": "Bob", "日期": "2024-01-02"},
+        ]
+    )
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, index=False, sheet_name="SheetA")
+    buffer.seek(0)
+
+    response = client.post(
+        "/config/preview",
+        data={"sheet": "SheetA", "row_limit": "5"},
+        files={
+            "workbook": (
+                "sample.xlsx",
+                buffer.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sheet"] == "SheetA"
+    assert payload["headers"] == ["raw_id", "姓名", "日期"]
+    assert payload["metadata_collisions"] == ["raw_id"]
+    assert payload["suggested_required_columns"] == ["姓名", "日期"]
+    assert payload["suggested_column_mappings"] == {"姓名": "姓名", "日期": "日期"}
 
 
 def test_create_upload_limit_violation(monkeypatch):

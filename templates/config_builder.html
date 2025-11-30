@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Config Builder | SIMS Uploader{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel__header">
+    <div>
+      <p class="muted">Admin</p>
+      <h2>Worksheet configuration builder</h2>
+      <p class="muted">
+        Upload a workbook sample to detect headers, prefill column mappings, and spot
+        missing or colliding fields before saving your configuration.
+      </p>
+    </div>
+  </div>
+
+  <form id="preview-form" class="form-grid" enctype="multipart/form-data">
+    <div class="field-group">
+      <label for="workbook">Workbook sample</label>
+      <input
+        type="file"
+        id="workbook"
+        name="workbook"
+        required
+        accept=".xlsx,.xlsm,.xls,.csv"
+      />
+      <p class="muted">Only the first few rows are read to keep previews fast.</p>
+    </div>
+    <div class="field-group">
+      <label for="sheet">Sheet name</label>
+      <input type="text" id="sheet" name="sheet" value="TEACH_RECORD" />
+    </div>
+    <div class="field-group">
+      <label for="workbook_type">Workbook type</label>
+      <input type="text" id="workbook_type" name="workbook_type" value="default" />
+    </div>
+    <div class="field-group">
+      <label for="row_limit">Rows to sample</label>
+      <input type="number" id="row_limit" name="row_limit" value="20" min="1" max="200" />
+    </div>
+    <div class="field-group">
+      <label class="checkbox">
+        <input type="checkbox" name="rename_last_subject" value="true" />
+        Rename the last unnamed "subject" column
+      </label>
+      <p class="muted">
+        Uses the same header cleanup rules as <code>prep_excel</code> when enabled.
+      </p>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="primary-button">Preview headers</button>
+      <span class="muted" data-upload-hint>Waiting for a workbook sample…</span>
+    </div>
+  </form>
+
+  <div id="preview-state" class="table-state table-state--empty">
+    Upload a workbook to inspect detected headers and auto-generated mappings.
+  </div>
+
+  <div id="preview-results" hidden>
+    <div class="result-grid">
+      <div>
+        <h3>Detected headers</h3>
+        <p class="muted">Pulled from the cleaned sheet preview.</p>
+        <ul class="pill-list" data-detected-headers></ul>
+      </div>
+      <div>
+        <h3>Metadata columns</h3>
+        <p class="muted">Always reserved during ingestion.</p>
+        <ul class="pill-list" data-metadata-list></ul>
+        <div class="alert alert--error" data-collision-warning hidden>
+          <strong>Heads up:</strong> Some source headers collide with reserved metadata
+          fields. Consider renaming them before saving a configuration.
+          <div data-collision-list class="pill-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-wrapper">
+      <table class="data-table" data-mapping-table>
+        <thead>
+          <tr>
+            <th>Target column</th>
+            <th>Source header</th>
+            <th>Required</th>
+          </tr>
+        </thead>
+        <tbody data-mapping-body>
+          <tr>
+            <td colspan="3" class="table-state table-state--empty" data-empty-row>
+              Preview a workbook to build mappings.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="form-actions">
+      <button type="button" class="primary-button" data-validate>Validate mappings</button>
+      <div
+        class="table-state table-state--error"
+        data-validation-messages
+        role="status"
+        hidden
+      ></div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', path='js/config-builder.js') }}" defer></script>
+{% endblock %}

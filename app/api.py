@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any
+import warnings
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+import pandas as pd
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
@@ -118,6 +121,81 @@ class UploadFileResponse(BaseModel):
     file_size: int
 
 
+class ConfigPreviewResponse(BaseModel):
+    """Response returned after previewing an uploaded workbook's headers."""
+
+    sheet: str
+    workbook_type: str
+    row_limit: int
+    headers: list[str]
+    metadata_columns: list[str]
+    metadata_collisions: list[str]
+    suggested_required_columns: list[str]
+    suggested_column_mappings: dict[str, str]
+
+
+def _resolve_metadata_defaults() -> tuple[str, ...]:
+    try:
+        from app.normalize_staging import DEFAULT_METADATA_COLUMNS
+    except Exception:
+        return (
+            "raw_id",
+            "file_hash",
+            "batch_id",
+            "source_year",
+            "ingested_at",
+        )
+
+    return tuple(DEFAULT_METADATA_COLUMNS)
+
+
+DEFAULT_PREVIEW_SHEET = "TEACH_RECORD"
+DEFAULT_PREVIEW_ROWS = 20
+MAX_PREVIEW_ROWS = 200
+
+
+async def _read_preview_dataframe(
+    file: UploadFile, *, sheet: str, row_limit: int, rename_last_subject: bool
+):
+    try:
+        from app import prep_excel
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Unable to import header normalizer: {exc}",
+        ) from exc
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="Uploaded workbook is empty."
+        )
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Workbook contains no default style, apply openpyxl's default",
+                category=UserWarning,
+                module="openpyxl.styles.stylesheet",
+            )
+            dataframe = pd.read_excel(
+                BytesIO(content), sheet_name=sheet, dtype=str, nrows=row_limit
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive catch for IO/format errors
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Unable to read workbook: {exc}",
+        ) from exc
+
+    dataframe = prep_excel.normalize_headers_and_subject(
+        dataframe, rename_last_subject=rename_last_subject
+    )
+    return dataframe
+
+
 @app.exception_handler(job_runner.UploadLimitExceeded)
 async def _handle_limit_error(request, exc: job_runner.UploadLimitExceeded):  # pragma: no cover - FastAPI hooks
     summary = str(exc)
@@ -138,6 +216,51 @@ async def _handle_value_error(request, exc: ValueError):  # pragma: no cover - F
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(detail=message, validation_summary=None).model_dump(),
+    )
+
+
+@app.post("/config/preview", response_model=ConfigPreviewResponse)
+async def preview_config(
+    workbook: UploadFile = File(...),
+    sheet: str = Form(DEFAULT_PREVIEW_SHEET),
+    workbook_type: str = Form("default"),
+    row_limit: int = Form(DEFAULT_PREVIEW_ROWS),
+    rename_last_subject: bool = Form(False),
+) -> ConfigPreviewResponse:
+    """Read a workbook sample and suggest staging configuration values."""
+
+    normalized_sheet = sheet.strip() or DEFAULT_PREVIEW_SHEET
+    normalized_workbook_type = workbook_type.strip() or "default"
+
+    if row_limit <= 0 or row_limit > MAX_PREVIEW_ROWS:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"row_limit must be between 1 and {MAX_PREVIEW_ROWS}",
+        )
+
+    dataframe = await _read_preview_dataframe(
+        workbook,
+        sheet=normalized_sheet,
+        row_limit=row_limit,
+        rename_last_subject=rename_last_subject,
+    )
+
+    headers = [str(header) for header in dataframe.columns]
+    metadata_defaults = _resolve_metadata_defaults()
+    metadata_set = set(metadata_defaults)
+    metadata_collisions = [header for header in headers if header in metadata_set]
+    suggested_required = [header for header in headers if header not in metadata_set]
+    suggested_mappings = {header: header for header in suggested_required}
+
+    return ConfigPreviewResponse(
+        sheet=normalized_sheet,
+        workbook_type=normalized_workbook_type,
+        row_limit=row_limit,
+        headers=headers,
+        metadata_columns=list(metadata_defaults),
+        metadata_collisions=metadata_collisions,
+        suggested_required_columns=suggested_required,
+        suggested_column_mappings=suggested_mappings,
     )
 
 

@@ -30,6 +30,11 @@
             class="{% if current_path == request.url_for('render_new_upload_form') %}active{% endif %}"
             >New Upload</a
           >
+          <a
+            href="{{ request.url_for('render_config_builder') }}"
+            class="{% if current_path == request.url_for('render_config_builder') %}active{% endif %}"
+            >Config Builder</a
+          >
         </nav>
       </div>
     </header>

@@ -24,6 +24,13 @@ async def render_home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("home.html", {"request": request})
 
 
+@router.get("/config/builder", response_class=HTMLResponse)
+async def render_config_builder(request: Request) -> HTMLResponse:
+    """Render the admin screen for building worksheet configurations."""
+
+    return templates.TemplateResponse("config_builder.html", {"request": request})
+
+
 @router.get("/uploads/new", response_class=HTMLResponse)
 async def render_new_upload_form(request: Request) -> HTMLResponse:
     """Render the form for enqueuing a new upload job."""
