@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -63,4 +63,30 @@ async def render_uploads_list(request: Request) -> HTMLResponse:
             "initial_jobs": initial_jobs,
             "load_error": load_error,
         },
+    )
+
+
+@router.get("/uploads/{job_id}", response_class=HTMLResponse)
+async def render_upload_detail(request: Request, job_id: str) -> HTMLResponse:
+    """Render details and event history for a single upload job."""
+
+    not_found_message: str | None = None
+    status_code = 200
+
+    try:
+        job_store.get_job(job_id)
+    except (HTTPException, ValueError):
+        not_found_message = (
+            "This upload job no longer exists. You can return to uploads to start a new one."
+        )
+        status_code = 404
+
+    return templates.TemplateResponse(
+        "uploads/detail.html",
+        {
+            "request": request,
+            "job_id": job_id,
+            "not_found_message": not_found_message,
+        },
+        status_code=status_code,
     )
