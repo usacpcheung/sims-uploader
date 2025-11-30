@@ -1,52 +1,59 @@
 # SIMS Data Uploader
 
 ## Overview
-SIMS Data Uploader is a toolkit for cleaning, validating, and ingesting school MIS spreadsheets into MariaDB. It is designed for
-teams that routinely receive Excel workbooks with inconsistent schemas and need a repeatable way to normalize data for reporting
-pipelines and future APIs. Recent work introduced a job-tracking subsystem so asynchronous services and UIs can surface upload
-progress in real time.
+SIMS Data Uploader converts messy MIS spreadsheets into normalized MariaDB tables while tracking every upload as a background job. The toolkit includes:
+
+- A FastAPI service with REST endpoints for uploading binaries, enqueuing jobs, and polling progress.
+- A thin web UI (Jinja templates + static JS) that mirrors the API contract described in [`docs/web-ui.md`](docs/web-ui.md).
+- CLI utilities for local normalization, bulk loading, and full-pipeline orchestration.
+- A Redis/RQ worker that executes the end-to-end pipeline and records validation errors.
+
+Recent work added an end-to-end pipeline (`app.pipeline`) that chains worksheet preparation, staging loads, normalized schema management, validation, and rejected-row export. Both the API and CLI share this pipeline so behavior stays consistent across interfaces.
 
 ## Key Capabilities
-- **Excel normalization** – `app.prep_excel` rewrites messy worksheets into CSV files that match database staging tables while
-  preserving metadata.
-- **Bulk ingestion** – `app.ingest_excel` streams the normalized CSV into MariaDB using `LOAD DATA LOCAL INFILE`, filling audit
-  columns such as `file_hash`, `batch_id`, `source_year`, and `ingested_at`.
-- **Job tracking store** – `app.job_store` exposes helpers backed by the `upload_jobs`, `upload_job_events`, and
-  `upload_job_results` tables to create jobs, record status transitions, and persist summary statistics.
-- **Config-driven mappings** – `sql/sheet_ingest_config.sql` holds worksheet→table relationships, required columns, and options
-  so onboarding new templates rarely requires Python changes.
-- **Test coverage** – `tests/test_job_store.py` uses PyMySQL doubles to guarantee SQL statements, transactions, and JSON
-  serialization behave as expected.
+- **Worksheet normalization** – `app.prep_excel` cleans headers, drops empty columns, and emits CSV aligned with staging tables.
+- **Staging + normalization pipeline** – `app.pipeline.run_pipeline` orchestrates staging via `app.ingest_excel`, normalized schema management via `app.normalize_staging`, and row-level validation via `app.validation`. Validation errors get surfaced to callers and saved alongside rejected rows.
+- **Job tracking store** – `app.job_store` manages `upload_jobs`, `upload_job_events`, and `upload_job_results` tables to expose status, event history, and summary metrics.
+- **Queued execution** – `app.job_runner` registers jobs with Redis/RQ, enforces file-size/row-count limits, and marks status transitions during worker execution.
+- **Storage helpers** – `app.storage` enforces Excel extensions, stores binaries under a UUID-prefixed path, and recovers the original filename for database records.
+- **API + UI** – `app.api` exposes `/uploads/files`, `/uploads`, `/uploads/{id}`, and `/uploads/{id}/events`. `app.web` serves a starter UI at `/ui` for operators who prefer a browser.
 
 ## Project Layout
 ```
 sims-uploader/
 ├── app/
-│   ├── __init__.py
-│   ├── config.py            # Environment + database connection helpers
-│   ├── job_store.py         # Dataclasses and SQL helpers for upload job tracking
-│   ├── ingest_excel.py      # CLI to load normalized CSV into staging tables
-│   └── prep_excel.py        # CLI/utility to sanitize Excel worksheets into CSV
+│   ├── api.py                # FastAPI endpoints for uploads, job detail, and events
+│   ├── config.py             # Environment + database connection helpers
+│   ├── ingest_excel.py       # Bulk load normalized CSV into staging tables
+│   ├── job_runner.py         # RQ queue + worker utilities and job status hooks
+│   ├── job_store.py          # Dataclasses and SQL helpers for job/event/result tables
+│   ├── normalize_staging.py  # Normalize staging rows into flexible destination schemas
+│   ├── pipeline.py           # End-to-end prep → staging → normalization → validation
+│   ├── prep_excel.py         # CLI/utility to sanitize Excel worksheets into CSV
+│   ├── storage.py            # File-extension enforcement and upload path helpers
+│   ├── validation.py         # Validation + rejected-row export for normalized rows
+│   └── web.py                # Jinja routes for the browser-based uploader
 │
+├── docs/
+│   └── web-ui.md             # Contract between the web UI and the Upload API
 ├── sql/
 │   ├── migrations/
-│   │   └── 20241013_create_upload_job_tables.sql  # Upload job schema
-│   ├── sheet_ingest_config.sql  # Configuration table for worksheet mappings
-│   └── teach_record_raw.sql     # Example staging table DDL
-│
+│   │   └── 20241013_create_upload_job_tables.sql
+│   ├── sheet_ingest_config.sql
+│   └── teach_record_raw.sql
+├── static/                   # JS/CSS assets referenced by the Jinja templates
+├── templates/                # HTML templates for the built-in web UI
 ├── tests/
-│   ├── __init__.py
-│   └── test_job_store.py        # Unit coverage for job store helpers
-│
-├── uploads/                # Workspace for inbound Excel/CSV files (gitignored)
-├── requirements.txt        # Python dependencies
+│   └── test_job_store.py     # Unit coverage for job store helpers
+├── uploads/                  # Workspace for inbound Excel/CSV files (gitignored)
+├── requirements.txt          # Python dependencies
 └── README.md
 ```
 
 ## Getting Started
 ### Prerequisites
 - Ubuntu 22.04+ (or compatible), Python 3.10+, and access to MariaDB/MySQL 10.6+
-- `python3 -m venv` for virtual environments
+- Redis + RQ (for queued pipelines)
 - Database account with privileges to create schemas, tables, indexes, and run `LOAD DATA LOCAL INFILE`
 
 ### Installation
@@ -59,13 +66,12 @@ pip install -r requirements.txt
 cp .env.example .env  # populate DB host/user/password/database + Redis settings
 mkdir -p uploads      # optional workspace for raw spreadsheets
 ```
-All CLI entrypoints read credentials through `app.config.get_db_settings()`, so keep secrets inside `.env` rather than source
-files. Add Redis configuration, queue limits, and upload storage configuration alongside database credentials:
+All entrypoints load credentials via `app.config.get_db_settings()`, so keep secrets inside `.env` rather than source files. Add Redis configuration, queue limits, and upload storage configuration alongside database credentials:
 
-```
+```env
 REDIS_URL=redis://localhost:6379/0
-UPLOAD_QUEUE_NAME=sims_uploads         # optional override for the queue name
-UPLOAD_MAX_FILE_SIZE_BYTES=104857600   # 100 MiB default; adjust per deployment
+UPLOAD_QUEUE_NAME=sims_uploads         # override queue name if desired
+UPLOAD_MAX_FILE_SIZE_BYTES=104857600   # 100 MiB default; override per deployment
 UPLOAD_MAX_ROWS=500000                 # Reject uploads reporting more rows than this limit
 UPLOAD_STORAGE_DIR=/var/lib/sims-uploads  # Optional; defaults to ./uploads when unset
 ```
@@ -78,119 +84,74 @@ UPLOAD_STORAGE_DIR=/var/lib/sims-uploads  # Optional; defaults to ./uploads when
    SOURCE sql/sheet_ingest_config.sql;
    SOURCE sql/teach_record_raw.sql;
    ```
-2. Apply migrations stored in `sql/migrations/` **in ascending filename order** to keep dependencies intact:
+2. Apply migrations in `sql/migrations/` in ascending filename order so dependencies remain intact:
    ```sql
    SOURCE sql/migrations/20241013_create_upload_job_tables.sql;
    ```
-   The initial migration introduces:
-   - `upload_jobs` – a UUID-keyed record representing each uploaded workbook and its metadata.
-   - `upload_job_events` – append-only log of state transitions (`status`, `message`, and timestamps).
-   - `upload_job_results` – one-to-one summary metrics (row counts, normalized table name, rejected row path, JSON coverage).
-
-   Run this migration immediately after the base schema when setting up a new environment, and reapply new migration files as they
-   are added in future releases. A helper script is not required; relying on lexicographic filenames mirrors the approach used by
-   MySQL clients such as `SOURCE` and keeps sequencing explicit.
+   The migration introduces `upload_jobs` (job metadata), `upload_job_events` (status history), and `upload_job_results` (aggregate counts + coverage metadata).
 
 ## Command-Line Workflows
-### 0. Queue Upload Jobs
+### 0. Queue Upload Jobs (recommended)
 ```bash
 python -m app.pipeline uploads/your_file.xlsx --source-year 2024
 ```
-- Creates an entry in `upload_jobs`, enforces size/row limits, and enqueues the payload for background processing.
-- Accepts the same worksheet and workbook type arguments as the legacy CLI but returns immediately with an RQ job id.
+- Creates a job row and enqueues the payload for background processing.
+- Enforces file-size/row-count limits before the worker starts.
 
 Start a worker in another terminal to drain the queue:
-
 ```bash
 python -m app.job_runner worker
 ```
-- Reads `REDIS_URL`/`UPLOAD_QUEUE_NAME` (or `--redis-url`/`--queue` overrides) to connect to Redis.
-- Logs receipt of `SIGTERM`/`SIGINT` and requests a graceful shutdown after the current job finishes, ensuring the queue drains cleanly.
+- Honors `REDIS_URL`/`UPLOAD_QUEUE_NAME` (or `--redis-url`/`--queue` overrides).
+- Logs SIGTERM/SIGINT and drains the current job before shutdown.
 
 ### 1. Preprocess Excel Workbooks
-- ```bash
+```bash
 python -m app.prep_excel uploads/your_file.xlsx
 ```
-- Cleans header rows, drops empty columns, and aligns column order with the target staging table.
+- Cleans headers, drops empty columns, and aligns column order with the target staging table.
 - Hashes the workbook to prevent duplicate ingestion and appends the hash to the generated CSV filename.
-- Validates presence of required columns declared in `sheet_ingest_config`. Missing headers raise a
-  `MissingColumnsError` (or exit with code `2` when run via CLI) so calling services can surface actionable feedback.
-- The CLI defaults to the `"default"` workbook type; ensure any workbook configuration intended for CLI use also inserts a
-  matching `"default"` row (or always invoke the CLI with an explicit `--workbook-type`).
+- Validates required columns from `sheet_ingest_config`; missing headers raise `MissingColumnsError` (CLI exit code `2`).
 
-### 2. Bulk Load Normalized Data (Legacy)
+### 2. Bulk Load Normalized Data (legacy/manual)
 ```bash
 python -m app.ingest_excel uploads/your_file.xlsx TEACH_RECORD --source-year 2024
 ```
 - Skips work when the workbook hash already exists in the staging table.
-- Loads the CSV through `LOAD DATA LOCAL INFILE`, populating metadata columns inside a single transaction.
-- Accepts optional `--batch-id` and `--ingested-at` overrides for advanced scheduling workflows.
-- Use this path for ad-hoc recovery; the recommended production flow is to queue jobs and let workers orchestrate ingestion.
+- Uses `LOAD DATA LOCAL INFILE` inside a transaction to populate metadata columns.
+- Accepts optional `--batch-id` and `--ingested-at` overrides for recovery workflows.
 
-### 3. Track Upload Progress
-`app.job_store` exposes helpers that open short-lived PyMySQL connections using the same configuration as the CLI tools. The
-new `app.job_runner.enqueue_job` helper wraps job creation + queueing when you need to schedule uploads from another service:
-```python
-import os
+### 3. Full Pipeline Execution (worker path)
+The worker path wraps preparation, staging, normalization, and validation:
+- `app.pipeline.run_pipeline` prepares the worksheet, loads staging rows, ensures the normalized table exists, validates rows, inserts normalized data, exports rejected rows, and records coverage metadata.
+- Status updates (`Queued` → `Parsing` → `Validating` → `Loaded`/`Errors`) are captured in `upload_job_events`.
+- Validation failures mark the job as `Errors` and surface a summary in both the API and UI.
 
-from app import job_runner
-
-job_id, rq_job = job_runner.enqueue_job(
-    workbook_path="uploads/your_file.xlsx",
-    sheet="TEACH_RECORD",
-    source_year="2024",
-    file_size=os.path.getsize("uploads/your_file.xlsx"),
-)
-print("Queued job", job_id, "RQ id", rq_job.id)
+## API + Web UI
+Start the FastAPI service with Uvicorn:
+```bash
+uvicorn app.api:app --reload
 ```
-- Every status change records an event row, making it easy to drive dashboards or alerting.
-- Helpers return dataclasses populated from the database so timestamps, default values, and computed fields are readily available.
-- Transactions automatically roll back on exceptions; integrity errors raise informative exceptions for the caller.
+- `POST /uploads/files` streams the workbook binary into `UPLOAD_STORAGE_DIR`, enforcing extension and size checks.
+- `POST /uploads` enqueues the upload job (mirrors the CLI queue helper) and returns the created job.
+- `GET /uploads/{job_id}` and `GET /uploads/{job_id}/events` provide job detail and event timelines.
+- `GET /uploads` lists recent jobs (default 20, max 100) newest first.
+- Browser users can visit `/ui` for a basic uploader built on these endpoints; see [`docs/web-ui.md`](docs/web-ui.md) for the UI contract and polling cadence.
+
+## Configuration Notes
+- `.xlsx`, `.xlsm`, and `.xls` are accepted; other extensions are rejected at upload time.
+- `UPLOAD_STORAGE_DIR` is created automatically; size it based on `UPLOAD_MAX_FILE_SIZE_BYTES` and expected concurrency.
+- `uploads/` is gitignored; never commit real student or teacher data.
+- Ensure MariaDB `local_infile` is enabled for `LOAD DATA LOCAL INFILE` to operate correctly.
 
 ## Running Tests
 ```bash
 pytest
 ```
-The suite currently focuses on the job store to guarantee SQL parameters, transaction boundaries, and JSON serialization are
-stable. Additional tests will be added as more ingest pipelines and APIs come online.
-
-## API Service
-- Start the FastAPI application with Uvicorn:
-  ```bash
-  uvicorn app.api:app --reload
-  ```
-- `POST /uploads/files` is the staging endpoint for raw workbook binaries. It validates the extension, enforces the file-size
-  limit (`UPLOAD_MAX_FILE_SIZE_BYTES`), and persists the file under `UPLOAD_STORAGE_DIR` (default `./uploads`). The response
-  includes the generated `stored_path`, which should be passed to `POST /uploads` as `workbook_path`.
-- `POST /uploads` mirrors the CLI queue helper and enforces the same file-size/row-count hints before scheduling work.
-- `GET /uploads/{job_id}`, `/uploads/{job_id}/events`, and `GET /uploads` expose the job store helpers for dashboards or CLI tooling to poll upload progress.
-
-Browser and other interactive clients should upload files directly via `/uploads/files` instead of relying on server-visible
-paths. The UI now performs this two-step process (file upload ➜ job enqueue) so operators do not need to pre-position
-workbooks on disk.
-
-## Operational Notes
-- The repository ignores `.xlsx`, `.csv`, `.env`, and everything inside `uploads/`; never commit real student or teacher data.
-- Always configure MariaDB with `utf8mb4` to handle Chinese characters, emoji, and future multilingual content.
-- Ensure `local_infile` is enabled on both server and client connections so `LOAD DATA LOCAL INFILE` operates correctly.
-- Rotate database credentials periodically and share `.env` values securely.
-- Housekeeping: the upload storage directory (`UPLOAD_STORAGE_DIR` or `./uploads`) is append-only. Schedule periodic cleanup
-  of staged files after they have been ingested to reclaim space. Size the volume based on `UPLOAD_MAX_FILE_SIZE_BYTES`,
-  expected concurrency on `UPLOAD_QUEUE_NAME`, and the configured `UPLOAD_MAX_ROWS` so temporary storage does not exhaust the
-  host.
+The current suite focuses on the job store to verify SQL parameters, transaction boundaries, and JSON serialization. Add targeted tests alongside new ingest pipelines, validators, and API routes.
 
 ## Roadmap
-1. **Additional workbook types** – attendance, activities, awards, and counseling records with dedicated staging tables.
-2. **FastAPI service** – browser-based uploader with progress dashboards powered by the job store.
-3. **Automated normalization** – background workers to transform staging data into fully relational models (`students`,
-   `teachers`, `subjects`, etc.).
-4. **Observability** – structured logging, metrics, and alerting for ingestion failures.
-5. **Containerization** – Docker images + compose files for consistent deployments.
-6. **Data governance** – configurable retention policies for uploads, rejected rows, and job history.
-
-## Contributing
-1. Fork and clone the repository.
-2. Create a virtual environment and install dependencies.
-3. Run `pytest` before submitting pull requests.
-4. Follow the lexicographic migration convention when adding new SQL files.
-5. Document new workflows in this README so operations remain reproducible.
+1. Harden validation and rejected-row reporting for additional workbook types (attendance, activities, awards, counseling records).
+2. Expand API filtering/pagination for job listings and event timelines to support deeper history views in the UI.
+3. Add structured logging/metrics and container images for production deployments.
+4. Automate normalization into relational models (`students`, `teachers`, `subjects`, etc.) after staging ingestion completes.
