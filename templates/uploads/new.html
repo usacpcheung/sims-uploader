@@ -12,10 +12,9 @@
     <form
       id="upload-form"
       class="form-grid"
-      novalidate
       data-enqueue-url="{{ request.url_for('create_upload_job') }}"
       data-upload-url="{{ request.url_for('upload_workbook') }}"
-      data-job-detail-url="{{ request.url_for('get_upload_job', job_id='__JOB_ID__') }}"
+      data-uploads-list-url="{{ request.url_for('render_uploads_list') }}"
     >
       <div class="field-group">
         <label for="workbook_file">Workbook file</label>
@@ -35,6 +34,7 @@
           placeholder="\\\path\to\workbook.xlsx"
         />
         <p class="field-help">Leave blank when uploading a file; provide a path to enqueue without uploading.</p>
+        <p class="field-error" data-error-for="manual_workbook_path" hidden></p>
       </div>
 
       <div class="field-group">
@@ -46,6 +46,7 @@
           autocomplete="off"
           placeholder="Workbook display name"
         />
+        <p class="field-error" data-error-for="workbook_name" hidden></p>
       </div>
 
       <div class="field-group">
@@ -54,10 +55,10 @@
           type="text"
           id="sheet"
           name="sheet"
-          required
           autocomplete="off"
           placeholder="Worksheet reference"
         />
+        <p class="field-error" data-error-for="sheet" hidden></p>
       </div>
 
       <div class="field-group">
@@ -77,10 +78,10 @@
           type="text"
           id="source_year"
           name="source_year"
-          required
           autocomplete="off"
           placeholder="2024"
         />
+        <p class="field-error" data-error-for="source_year" hidden></p>
       </div>
 
       <div class="field-group">
@@ -102,6 +103,7 @@
       <div class="field-group">
         <label for="file_size">File size (bytes)</label>
         <input type="number" id="file_size" name="file_size" min="0" step="1" />
+        <p class="field-error" data-error-for="file_size" hidden></p>
       </div>
 
       <div class="field-group">
@@ -140,16 +142,54 @@
       const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
       const enqueueUrl = form.dataset.enqueueUrl;
       const uploadUrl = form.dataset.uploadUrl;
-      const jobDetailUrlTemplate = form.dataset.jobDetailUrl;
+      const uploadsListUrl = form.dataset.uploadsListUrl;
       const workbookFileInput = document.getElementById('workbook_file');
       const workbookPathField = document.getElementById('workbook_path');
       const manualPathField = document.getElementById('manual_workbook_path');
       const workbookNameField = document.getElementById('workbook_name');
       const fileSizeField = document.getElementById('file_size');
+      const sheetField = document.getElementById('sheet');
+      const sourceYearField = document.getElementById('source_year');
+      const workbookTypeField = document.getElementById('workbook_type');
 
-      if (!enqueueUrl || !jobDetailUrlTemplate) {
+      function setDefaultValues() {
+        const currentYear = new Date().getFullYear();
+        if (sourceYearField && !sourceYearField.value) {
+          sourceYearField.value = String(currentYear);
+        }
+        if (workbookTypeField && !workbookTypeField.value) {
+          workbookTypeField.value = 'default';
+        }
+      }
+
+      setDefaultValues();
+
+      if (!enqueueUrl || !uploadsListUrl) {
         console.error('Upload form is missing required URL data attributes.');
         return;
+      }
+
+      function clearFieldErrors() {
+        const errorFields = form.querySelectorAll('[data-error-for]');
+        errorFields.forEach((field) => {
+          field.textContent = '';
+          field.hidden = true;
+        });
+        form.querySelectorAll('.input--error').forEach((input) => {
+          input.classList.remove('input--error');
+        });
+      }
+
+      function setFieldError(fieldId, message) {
+        const target = form.querySelector(`[data-error-for="${fieldId}"]`);
+        const input = document.getElementById(fieldId);
+        if (target) {
+          target.textContent = message;
+          target.hidden = !message;
+        }
+        if (input && message) {
+          input.classList.add('input--error');
+        }
       }
 
       function resetFeedback() {
@@ -160,7 +200,25 @@
         if (statusBox) {
           statusBox.textContent = '';
         }
+        clearFieldErrors();
       }
+
+      function deriveFileMetadata(file) {
+        if (!file) return;
+        if (workbookNameField && !workbookNameField.value) {
+          workbookNameField.value = file.name;
+        }
+        if (fileSizeField && !fileSizeField.value && typeof file.size === 'number') {
+          fileSizeField.value = file.size;
+        }
+      }
+
+      workbookFileInput?.addEventListener('change', () => {
+        const file = workbookFileInput.files?.[0];
+        if (file) {
+          deriveFileMetadata(file);
+        }
+      });
 
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -174,14 +232,24 @@
         const selectedFile = workbookFileInput?.files?.[0] || null;
         const manualPath = (manualPathField?.value || '').trim();
 
+        let hasError = false;
         if (!selectedFile && !manualPath) {
-          if (errorBox) {
-            errorBox.textContent = 'Choose a workbook file to upload or provide a workbook path.';
-            errorBox.hidden = false;
-          }
-          if (statusBox) {
-            statusBox.textContent = '';
-          }
+          setFieldError(
+            'manual_workbook_path',
+            'Choose a workbook file or provide a workbook path.'
+          );
+          hasError = true;
+        }
+        if (sheetField && !sheetField.value.trim()) {
+          setFieldError('sheet', 'Sheet is required.');
+          hasError = true;
+        }
+        if (sourceYearField && !sourceYearField.value.trim()) {
+          setFieldError('source_year', 'Source year is required.');
+          hasError = true;
+        }
+
+        if (hasError) {
           if (submitButton) {
             submitButton.disabled = false;
           }
@@ -242,6 +310,8 @@
               }
             }
 
+            deriveFileMetadata(selectedFile);
+
             if (statusBox) {
               statusBox.textContent = 'Enqueuing upload request…';
             }
@@ -297,14 +367,18 @@
 
           if (response.status === 202 && data && data.job && data.job.job_id) {
             if (statusBox) {
-              statusBox.textContent = 'Upload queued! Redirecting to job details…';
+              statusBox.textContent = 'Upload queued! Redirecting to uploads list…';
             }
             const jobId = data.job.job_id;
-            const jobDetailUrl = jobDetailUrlTemplate.replace(
-              '__JOB_ID__',
-              encodeURIComponent(jobId)
+            const redirectUrl = new URL(uploadsListUrl, window.location.origin);
+            redirectUrl.searchParams.set(
+              'notice',
+              'Upload queued and will begin processing shortly.'
             );
-            window.location.assign(jobDetailUrl);
+            if (jobId) {
+              redirectUrl.searchParams.set('job_id', jobId);
+            }
+            window.location.assign(redirectUrl.toString());
             return;
           }
 

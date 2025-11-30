@@ -9,7 +9,18 @@
         <h2>Recent Uploads</h2>
         <p class="muted">Monitor the most recent workbook uploads and their processing status.</p>
       </div>
+      <div class="form-actions">
+        <button class="primary-button" type="button" data-refresh-button>Refresh now</button>
+      </div>
     </header>
+
+    <div class="alert alert--info" data-queued-notice hidden>
+      <div>
+        <strong data-notice-title>Upload queued.</strong>
+        <span data-notice-body>Processing will begin shortly.</span>
+      </div>
+      <button class="link-button" type="button" data-dismiss-notice aria-label="Dismiss notice">Dismiss</button>
+    </div>
 
     <div
       class="table-wrapper"
@@ -60,6 +71,11 @@
       const fetchContainer = document.querySelector('[data-fetch-url]');
       const fetchUrl = fetchContainer ? fetchContainer.dataset.fetchUrl : null;
       const loadError = fetchContainer ? fetchContainer.dataset.loadError === 'true' : false;
+      const refreshButton = document.querySelector('[data-refresh-button]');
+      const noticeBanner = document.querySelector('[data-queued-notice]');
+      const noticeTitle = document.querySelector('[data-notice-title]');
+      const noticeBody = document.querySelector('[data-notice-body]');
+      const dismissNotice = document.querySelector('[data-dismiss-notice]');
 
       const initialJobsEl = document.getElementById('initial-jobs');
       let initialJobs = [];
@@ -118,9 +134,44 @@
         renderState(jobs);
       }
 
-      async function fetchUploads() {
+      function showNoticeFromQuery() {
+        const params = new URLSearchParams(window.location.search);
+        const noticeMessage = params.get('notice');
+        if (!noticeMessage || !noticeBanner) return;
+
+        const jobId = params.get('job_id');
+        if (noticeTitle) {
+          noticeTitle.textContent = 'Upload queued';
+        }
+        if (noticeBody) {
+          noticeBody.textContent = jobId
+            ? `${noticeMessage} Job ID: ${jobId}.`
+            : `${noticeMessage}`;
+        }
+
+        setVisibility(noticeBanner, true);
+
+        const clearedParams = new URLSearchParams(window.location.search);
+        clearedParams.delete('notice');
+        clearedParams.delete('job_id');
+        const queryString = clearedParams.toString();
+
+        dismissNotice?.addEventListener('click', () => {
+          setVisibility(noticeBanner, false);
+          window.history.replaceState(
+            {},
+            '',
+            queryString ? `${window.location.pathname}?${queryString}` : window.location.pathname
+          );
+        });
+      }
+
+      async function fetchUploads(options = {}) {
+        const { showLoading = true } = options;
         if (!fetchUrl) return;
-        setVisibility(loadingState, true);
+        if (showLoading) {
+          setVisibility(loadingState, true);
+        }
         setVisibility(errorState, false);
         try {
           const response = await fetch(fetchUrl);
@@ -135,12 +186,24 @@
             setVisibility(errorState, true);
           }
         } finally {
-          setVisibility(loadingState, false);
+          if (showLoading) {
+            setVisibility(loadingState, false);
+          }
         }
       }
 
       populateFrom(initialJobs);
-      fetchUploads();
+      showNoticeFromQuery();
+      fetchUploads({ showLoading: !initialJobs.length });
+
+      refreshButton?.addEventListener('click', () => {
+        fetchUploads({ showLoading: true });
+      });
+
+      const POLL_INTERVAL_MS = 12000;
+      setInterval(() => {
+        fetchUploads({ showLoading: false });
+      }, POLL_INTERVAL_MS);
     })();
   </script>
 {% endblock %}
