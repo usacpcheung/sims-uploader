@@ -28,7 +28,13 @@ def test_enqueue_job_enqueues_when_within_limits(monkeypatch):
     monkeypatch.setattr(job_runner, "get_queue", lambda: queue)
 
     created_job = SimpleNamespace(job_id="job-1")
-    monkeypatch.setattr(job_runner.job_store, "create_job", lambda **_: created_job)
+    captured_kwargs = {}
+
+    def fake_create_job(**kwargs):
+        captured_kwargs.update(kwargs)
+        return created_job
+
+    monkeypatch.setattr(job_runner.job_store, "create_job", fake_create_job)
     mark_error_calls = []
     monkeypatch.setattr(job_runner.job_store, "mark_error", lambda *args, **kwargs: mark_error_calls.append((args, kwargs)))
 
@@ -45,6 +51,7 @@ def test_enqueue_job_enqueues_when_within_limits(monkeypatch):
     assert rq_job.id == "job-1"
     assert queue.enqueued and queue.enqueued[0].func is job_runner.process_job
     assert not mark_error_calls
+    assert captured_kwargs["original_filename"] == "workbook.xlsx"
 
 
 def test_enqueue_job_marks_error_when_limit_exceeded(monkeypatch):
@@ -73,6 +80,32 @@ def test_enqueue_job_marks_error_when_limit_exceeded(monkeypatch):
     assert not queue.enqueued
     assert errors and errors[0][0] == "job-2"
     assert "exceeds" in errors[0][1]
+
+
+def test_enqueue_job_extracts_original_from_stored_path(monkeypatch):
+    queue = QueueStub()
+    monkeypatch.setattr(job_runner, "get_queue", lambda: queue)
+
+    created_job = SimpleNamespace(job_id="job-3")
+    captured_kwargs = {}
+
+    def fake_create_job(**kwargs):
+        captured_kwargs.update(kwargs)
+        return created_job
+
+    monkeypatch.setattr(job_runner.job_store, "create_job", fake_create_job)
+    monkeypatch.setattr(job_runner.job_store, "mark_error", lambda *args, **kwargs: None)
+
+    stored_path = "uploads/abcdef1234567890__example.xlsx"
+
+    job_runner.enqueue_job(
+        workbook_path=stored_path,
+        sheet="SheetA",
+        source_year="2024",
+        queue=queue,
+    )
+
+    assert captured_kwargs["original_filename"] == "example.xlsx"
 
 
 def _setup_job_store_spies(monkeypatch):
