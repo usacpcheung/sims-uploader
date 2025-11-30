@@ -60,13 +60,14 @@ cp .env.example .env  # populate DB host/user/password/database + Redis settings
 mkdir -p uploads      # optional workspace for raw spreadsheets
 ```
 All CLI entrypoints read credentials through `app.config.get_db_settings()`, so keep secrets inside `.env` rather than source
-files. Add Redis configuration and queue limits alongside database credentials:
+files. Add Redis configuration, queue limits, and upload storage configuration alongside database credentials:
 
 ```
 REDIS_URL=redis://localhost:6379/0
 UPLOAD_QUEUE_NAME=sims_uploads         # optional override for the queue name
 UPLOAD_MAX_FILE_SIZE_BYTES=104857600   # 100 MiB default; adjust per deployment
 UPLOAD_MAX_ROWS=500000                 # Reject uploads reporting more rows than this limit
+UPLOAD_STORAGE_DIR=/var/lib/sims-uploads  # Optional; defaults to ./uploads when unset
 ```
 
 ## Database Setup
@@ -158,14 +159,25 @@ stable. Additional tests will be added as more ingest pipelines and APIs come on
   ```bash
   uvicorn app.api:app --reload
   ```
+- `POST /uploads/files` is the staging endpoint for raw workbook binaries. It validates the extension, enforces the file-size
+  limit (`UPLOAD_MAX_FILE_SIZE_BYTES`), and persists the file under `UPLOAD_STORAGE_DIR` (default `./uploads`). The response
+  includes the generated `stored_path`, which should be passed to `POST /uploads` as `workbook_path`.
 - `POST /uploads` mirrors the CLI queue helper and enforces the same file-size/row-count hints before scheduling work.
 - `GET /uploads/{job_id}`, `/uploads/{job_id}/events`, and `GET /uploads` expose the job store helpers for dashboards or CLI tooling to poll upload progress.
+
+Browser and other interactive clients should upload files directly via `/uploads/files` instead of relying on server-visible
+paths. The UI now performs this two-step process (file upload ➜ job enqueue) so operators do not need to pre-position
+workbooks on disk.
 
 ## Operational Notes
 - The repository ignores `.xlsx`, `.csv`, `.env`, and everything inside `uploads/`; never commit real student or teacher data.
 - Always configure MariaDB with `utf8mb4` to handle Chinese characters, emoji, and future multilingual content.
 - Ensure `local_infile` is enabled on both server and client connections so `LOAD DATA LOCAL INFILE` operates correctly.
 - Rotate database credentials periodically and share `.env` values securely.
+- Housekeeping: the upload storage directory (`UPLOAD_STORAGE_DIR` or `./uploads`) is append-only. Schedule periodic cleanup
+  of staged files after they have been ingested to reclaim space. Size the volume based on `UPLOAD_MAX_FILE_SIZE_BYTES`,
+  expected concurrency on `UPLOAD_QUEUE_NAME`, and the configured `UPLOAD_MAX_ROWS` so temporary storage does not exhaust the
+  host.
 
 ## Roadmap
 1. **Additional workbook types** – attendance, activities, awards, and counseling records with dedicated staging tables.
