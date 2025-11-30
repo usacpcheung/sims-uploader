@@ -131,14 +131,14 @@ def test_insert_normalized_rows_uses_identity_columns(sample_row, column_mapping
     cursor = _Cursor()
     connection = _Connection(cursor)
 
-    affected = normalize_staging.insert_normalized_rows(
+    result = normalize_staging.insert_normalized_rows(
         connection,
         "teach_record_normalized",
         [sample_row],
         column_mappings,
     )
 
-    assert affected == 1
+    assert result.inserted_count == 1
     assert len(cursor.executed) == 1
     sql, params = cursor.executed[0]
     assert "`日期`" in sql
@@ -151,6 +151,36 @@ def test_insert_normalized_rows_uses_identity_columns(sample_row, column_mapping
     assert row_values[1] == sample_row["file_hash"]
     assert row_values[ordered_columns.index("日期")] == dt.date(2024, 5, 1)
     assert row_values[ordered_columns.index("上課時數")] == Decimal("1.5")
+
+
+def test_prepare_normalization_collects_rejections(sample_row):
+    bad_row = dict(sample_row)
+    bad_row["上課時數"] = "not-a-number"
+
+    prepared = normalize_staging.prepare_normalization([bad_row], None)
+
+    assert prepared.normalized_rows == []
+    assert len(prepared.rejected_rows) == 1
+    rejection = prepared.rejected_rows[0]
+    assert "上課時數" in rejection.errors[0]
+
+
+def test_build_column_coverage_maps_sources():
+    rows = [
+        {
+            "id": 1,
+            "file_hash": "hash",
+            "batch_id": "batch",
+            "source_year": "2024",
+            "ingested_at": "2024-05-01T00:00:00",
+            "姓名": "Student",
+            "別名": "Alias",
+        }
+    ]
+    resolved = normalize_staging.resolve_column_mappings(rows, {"姓名": "姓名", "名字": "別名"})
+    coverage = normalize_staging.build_column_coverage(resolved)
+    assert coverage["姓名"] == ["姓名"]
+    assert coverage["別名"] == ["名字"]
 
 
 def test_resolve_column_mappings_adds_new_columns():

@@ -1,45 +1,53 @@
 # SIMS Data Uploader
 
-A tool for importing **school Excel data** (teaching records, attendance, student activities, awards, etc.) into a **MariaDB database** for reporting and analytics.
+## Overview
+SIMS Data Uploader is a toolkit for cleaning, validating, and ingesting school MIS spreadsheets into MariaDB. It is designed for
+teams that routinely receive Excel workbooks with inconsistent schemas and need a repeatable way to normalize data for reporting
+pipelines and future APIs. Recent work introduced a job-tracking subsystem so asynchronous services and UIs can surface upload
+progress in real time.
 
-The uploader’s job is to:
-- Clean and normalize messy Excel files (headers, blank columns, inconsistent structures).
-- Load data into a **staging table** in MariaDB using fast bulk methods.
-- Provide metadata (file hash, batch ID, ingestion time, source year) for tracking.
-- Allow downstream tools (Power BI, dashboards, custom apps) to query and visualize the data.
+## Key Capabilities
+- **Excel normalization** – `app.prep_excel` rewrites messy worksheets into CSV files that match database staging tables while
+  preserving metadata.
+- **Bulk ingestion** – `app.ingest_excel` streams the normalized CSV into MariaDB using `LOAD DATA LOCAL INFILE`, filling audit
+  columns such as `file_hash`, `batch_id`, `source_year`, and `ingested_at`.
+- **Job tracking store** – `app.job_store` exposes helpers backed by the `upload_jobs`, `upload_job_events`, and
+  `upload_job_results` tables to create jobs, record status transitions, and persist summary statistics.
+- **Config-driven mappings** – `sql/sheet_ingest_config.sql` holds worksheet→table relationships, required columns, and options
+  so onboarding new templates rarely requires Python changes.
+- **Test coverage** – `tests/test_job_store.py` uses PyMySQL doubles to guarantee SQL statements, transactions, and JSON
+  serialization behave as expected.
 
----
-
-## 📂 Project Structure
-
+## Project Layout
 ```
 sims-uploader/
 ├── app/
-│   ├── __init__.py             # Makes the ``app`` package importable
-│   ├── config.py               # Centralized environment loading helpers
-│   ├── prep_excel.py           # Excel → CSV preprocessor
-│   └── ingest_excel.py         # CSV loader that bulk-ingests into staging tables
+│   ├── __init__.py
+│   ├── config.py            # Environment + database connection helpers
+│   ├── job_store.py         # Dataclasses and SQL helpers for upload job tracking
+│   ├── ingest_excel.py      # CLI to load normalized CSV into staging tables
+│   └── prep_excel.py        # CLI/utility to sanitize Excel worksheets into CSV
 │
 ├── sql/
-│   ├── sheet_ingest_config.sql # Configuration table for sheet→staging mappings
-│   └── teach_record_raw.sql    # Example staging table DDL
+│   ├── migrations/
+│   │   └── 20241013_create_upload_job_tables.sql  # Upload job schema
+│   ├── sheet_ingest_config.sql  # Configuration table for worksheet mappings
+│   └── teach_record_raw.sql     # Example staging table DDL
 │
-├── uploads/                    # Drop source Excel/CSV files here (git-ignored contents)
-│   └── .gitkeep
+├── tests/
+│   ├── __init__.py
+│   └── test_job_store.py        # Unit coverage for job store helpers
 │
-├── .env.example                # Template for local environment variables
-├── requirements.txt            # Python dependencies
-└── README.md                   # Project overview
+├── uploads/                # Workspace for inbound Excel/CSV files (gitignored)
+├── requirements.txt        # Python dependencies
+└── README.md
 ```
 
----
-
-## ⚙️ Setup
-
+## Getting Started
 ### Prerequisites
-- Ubuntu 22.04+ with Git, Python 3.10+, MariaDB/MySQL
-- Virtualenv (`python3 -m venv .venv`)
-- Access to create/load into a MariaDB database
+- Ubuntu 22.04+ (or compatible), Python 3.10+, and access to MariaDB/MySQL 10.6+
+- `python3 -m venv` for virtual environments
+- Database account with privileges to create schemas, tables, indexes, and run `LOAD DATA LOCAL INFILE`
 
 ### Installation
 ```bash
@@ -48,109 +56,141 @@ cd sims-uploader
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # then edit .env with your database credentials
-mkdir -p uploads      # optional: ensure the uploads/ workspace exists
+cp .env.example .env  # populate DB host/user/password/database + Redis settings
+mkdir -p uploads      # optional workspace for raw spreadsheets
+```
+All CLI entrypoints read credentials through `app.config.get_db_settings()`, so keep secrets inside `.env` rather than source
+files. Add Redis configuration, queue limits, and upload storage configuration alongside database credentials:
+
+```
+REDIS_URL=redis://localhost:6379/0
+UPLOAD_QUEUE_NAME=sims_uploads         # optional override for the queue name
+UPLOAD_MAX_FILE_SIZE_BYTES=104857600   # 100 MiB default; adjust per deployment
+UPLOAD_MAX_ROWS=500000                 # Reject uploads reporting more rows than this limit
+UPLOAD_STORAGE_DIR=/var/lib/sims-uploads  # Optional; defaults to ./uploads when unset
 ```
 
-The `.env` file is loaded automatically by all ingestion tools via `app.config`, keeping credentials out of source code.
-
----
-
-## 🚀 Usage
-
-1. **Prepare Database**
+## Database Setup
+1. Create the schema and source the base SQL scripts:
    ```sql
    CREATE DATABASE SIMSdata CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    USE SIMSdata;
    SOURCE sql/sheet_ingest_config.sql;
    SOURCE sql/teach_record_raw.sql;
    ```
-
-2. **Preprocess Excel**
-   ```bash
-   source .venv/bin/activate
-   python -m app.prep_excel uploads/your_file.xlsx
-   ```
-   Store raw spreadsheets under `uploads/` so related CSVs remain out of Git. The script reads `.env` for database access, then writes a cleaned `.csv` alongside the Excel file. Output filenames are suffixed with the spreadsheet's SHA-256 hash (e.g. `your_file.<hash>.csv`) so re-processing the same worksheet never overwrites previous exports. It exits immediately with a helpful message if any required `DB_...` variables are missing.
-
-   The preprocessor inspects the target staging table schema (via `information_schema`) to determine which headers are mandatory. Columns listed under `required_columns` in the sheet configuration must appear in the spreadsheet, while metadata columns (e.g. `file_hash`) are ignored during validation. When running via the CLI, the tool prints `Missing required column(s): …` to `stderr` and exits with status code `2`. When `app.prep_excel.main` is imported and called from another service (e.g. a future web UI), a `MissingColumnsError` is raised; the exception exposes a `.missing_columns` tuple containing the absent header names so callers can surface a structured error to end users.
-
-   Sheet configuration (sheet→staging-table mapping, metadata columns, and future options) is stored in `sheet_ingest_config`. Each row is scoped by `workbook_type` so different templates can reuse the same worksheet label without clashing. Register the worksheets you plan to ingest with simple SQL instead of editing Python:
-
+2. Apply migrations stored in `sql/migrations/` **in ascending filename order** to keep dependencies intact:
    ```sql
-   INSERT INTO sheet_ingest_config (
-     workbook_type,
-     sheet_name,
-     staging_table,
-     metadata_columns,
-     required_columns,
-     options
-   )
-   VALUES (
-     'prototype_teaching_records',
-     'TEACH_RECORD',
-     'teach_record_raw',
-     JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at'),
-     JSON_ARRAY(
-       '記錄狀態', '日期', '任教老師', '學生編號', '姓名', '英文姓名', '性別',
-       '學生級別', '病房', '病床', '出勤 (來自出勤記錄輸入)', '出勤', '教學組別',
-       '科目', '取代科目', '教授科目', '課程級別', '教材', '課題', '教學重點1',
-       '教學重點2', '教學重點3', '教學重點4', '自定課題', '自定教學重點', '練習',
-       '上課時數', '備註', '教學跟進/回饋'
-     ),
-     JSON_OBJECT('rename_last_subject', TRUE)
-   )
-   ON DUPLICATE KEY UPDATE
-     staging_table = VALUES(staging_table),
-     metadata_columns = VALUES(metadata_columns),
-     required_columns = VALUES(required_columns),
-     options = VALUES(options);
+   SOURCE sql/migrations/20241013_create_upload_job_tables.sql;
    ```
+   The initial migration introduces:
+   - `upload_jobs` – a UUID-keyed record representing each uploaded workbook and its metadata.
+   - `upload_job_events` – append-only log of state transitions (`status`, `message`, and timestamps).
+   - `upload_job_results` – one-to-one summary metrics (row counts, normalized table name, rejected row path, JSON coverage).
 
-   The `required_columns` JSON array lets you explicitly state which business headers must be present for a given workbook type. Any other non-metadata columns can be treated as optional (for example, year-specific additions). The `options` JSON column toggles sheet-specific behaviours. For example, `rename_last_subject` controls whether unnamed trailing columns are renamed to “教授科目” and other blank unnamed columns are dropped—behaviour that only the prototype teaching-record sheet currently needs. Disable it by setting the flag to `FALSE` when registering other templates.
+   Run this migration immediately after the base schema when setting up a new environment, and reapply new migration files as they
+   are added in future releases. A helper script is not required; relying on lexicographic filenames mirrors the approach used by
+   MySQL clients such as `SOURCE` and keeps sequencing explicit.
 
-   To onboard a new Excel layout, create its staging table (e.g. `SOURCE sql/new_sheet_raw.sql;`) and insert the corresponding row into `sheet_ingest_config` with an appropriate `workbook_type`. The preprocessor will automatically pick up the mapping, query the live schema for required headers, and order columns to match the staging table on the next run—no code change required.
+## Command-Line Workflows
+### 0. Queue Upload Jobs
+```bash
+python -m app.pipeline uploads/your_file.xlsx --source-year 2024
+```
+- Creates an entry in `upload_jobs`, enforces size/row limits, and enqueues the payload for background processing.
+- Accepts the same worksheet and workbook type arguments as the legacy CLI but returns immediately with an RQ job id.
 
-   ### Deduplication workflow
+Start a worker in another terminal to drain the queue:
 
-  - Each staging table should index `file_hash` for quick lookups (see `sql/teach_record_raw.sql` for the canonical non-unique `KEY`). Do **not** enforce uniqueness at the database level because the loader writes the same hash to every row from a workbook.
-  - `app.prep_excel.main` hashes the original workbook before writing CSV output. If the hash already exists in the destination staging table, the script skips CSV generation and logs a warning to `stderr` so automated callers can gracefully short-circuit their pipelines. Keep this guard enabled to prevent duplicate uploads.
-  - UI consumers should treat a duplicate submission as a no-op: surface a “file already uploaded” notice to the user, keep the previous ingestion metadata untouched, and avoid queuing a second `LOAD DATA INFILE` job.
+```bash
+python -m app.job_runner worker
+```
+- Reads `REDIS_URL`/`UPLOAD_QUEUE_NAME` (or `--redis-url`/`--queue` overrides) to connect to Redis.
+- Logs receipt of `SIGTERM`/`SIGINT` and requests a graceful shutdown after the current job finishes, ensuring the queue drains cleanly.
 
-   When a new hash is encountered, the CLI prints the generated CSV path (with hash suffix) and the checksum itself on separate lines. Callers can persist both values for auditing and downstream loading. Programmatic integrations can call `app.prep_excel.main(..., emit_stdout=False)` to suppress those prints while still receiving the `(csv_path, file_hash)` tuple. Services that own their database pooling can also provide `connection=` (or pass alternative `db_settings=`) so the preprocessor reuses existing credentials instead of opening new connections for each helper call.
+### 1. Preprocess Excel Workbooks
+- ```bash
+python -m app.prep_excel uploads/your_file.xlsx
+```
+- Cleans header rows, drops empty columns, and aligns column order with the target staging table.
+- Hashes the workbook to prevent duplicate ingestion and appends the hash to the generated CSV filename.
+- Validates presence of required columns declared in `sheet_ingest_config`. Missing headers raise a
+  `MissingColumnsError` (or exit with code `2` when run via CLI) so calling services can surface actionable feedback.
+- The CLI defaults to the `"default"` workbook type; ensure any workbook configuration intended for CLI use also inserts a
+  matching `"default"` row (or always invoke the CLI with an explicit `--workbook-type`).
 
-3. **Bulk-load the cleaned CSV**
-   ```bash
-   python -m app.ingest_excel uploads/your_file.xlsx TEACH_RECORD --source-year 2024
-   ```
-   The loader reuses the preprocessor so duplicate uploads are detected by file
-   hash before any database work begins. When a new hash is encountered the
-   command bulk loads the generated CSV with `LOAD DATA LOCAL INFILE`, filling
-   the `file_hash`, `batch_id`, `source_year`, and `ingested_at` metadata
-   columns inside a single transaction. Provide `--batch-id` when you need to
-   associate several uploads with the same identifier; otherwise a database-side
-   `UUID()` is generated.
+### 2. Bulk Load Normalized Data (Legacy)
+```bash
+python -m app.ingest_excel uploads/your_file.xlsx TEACH_RECORD --source-year 2024
+```
+- Skips work when the workbook hash already exists in the staging table.
+- Loads the CSV through `LOAD DATA LOCAL INFILE`, populating metadata columns inside a single transaction.
+- Accepts optional `--batch-id` and `--ingested-at` overrides for advanced scheduling workflows.
+- Use this path for ad-hoc recovery; the recommended production flow is to queue jobs and let workers orchestrate ingestion.
 
-   > **Note:** MariaDB/MySQL must allow local file loads. Set
-   > `local_infile=1` on the server (e.g. in `mysqld.cnf`) and ensure clients
-   > enable the same flag. The CLI passes `local_infile=True` (with the
-   > accompanying client flag) automatically; if you connect through other
-   > tools, remember to enable the option there as well.
+### 3. Track Upload Progress
+`app.job_store` exposes helpers that open short-lived PyMySQL connections using the same configuration as the CLI tools. The
+new `app.job_runner.enqueue_job` helper wraps job creation + queueing when you need to schedule uploads from another service:
+```python
+import os
 
----
+from app import job_runner
 
-## 📊 Roadmap
+job_id, rq_job = job_runner.enqueue_job(
+    workbook_path="uploads/your_file.xlsx",
+    sheet="TEACH_RECORD",
+    source_year="2024",
+    file_size=os.path.getsize("uploads/your_file.xlsx"),
+)
+print("Queued job", job_id, "RQ id", rq_job.id)
+```
+- Every status change records an event row, making it easy to drive dashboards or alerting.
+- Helpers return dataclasses populated from the database so timestamps, default values, and computed fields are readily available.
+- Transactions automatically roll back on exceptions; integrity errors raise informative exceptions for the caller.
 
-- Support multiple Excel types (teaching records, attendance, activities, awards).
-- Add a FastAPI web interface for uploads and monitoring.
-- Normalize staging data into relational tables (e.g. `teachers`, `students`, `subjects`, `activities`).
-- Connect with BI tools (Power BI, Superset, custom dashboards).
-- Add Docker deployment option.
+## Running Tests
+```bash
+pytest
+```
+The suite currently focuses on the job store to guarantee SQL parameters, transaction boundaries, and JSON serialization are
+stable. Additional tests will be added as more ingest pipelines and APIs come online.
 
----
+## API Service
+- Start the FastAPI application with Uvicorn:
+  ```bash
+  uvicorn app.api:app --reload
+  ```
+- `POST /uploads/files` is the staging endpoint for raw workbook binaries. It validates the extension, enforces the file-size
+  limit (`UPLOAD_MAX_FILE_SIZE_BYTES`), and persists the file under `UPLOAD_STORAGE_DIR` (default `./uploads`). The response
+  includes the generated `stored_path`, which should be passed to `POST /uploads` as `workbook_path`.
+- `POST /uploads` mirrors the CLI queue helper and enforces the same file-size/row-count hints before scheduling work.
+- `GET /uploads/{job_id}`, `/uploads/{job_id}/events`, and `GET /uploads` expose the job store helpers for dashboards or CLI tooling to poll upload progress.
 
-## 🛡️ Notes
+Browser and other interactive clients should upload files directly via `/uploads/files` instead of relying on server-visible
+paths. The UI now performs this two-step process (file upload ➜ job enqueue) so operators do not need to pre-position
+workbooks on disk.
 
-- `.xlsx`, `.csv`, `.env`, and everything under `uploads/` are **ignored** by Git — do not commit real student/teacher data.
-- Always use `utf8mb4` for safe Unicode (Chinese characters, emoji, etc.).
-- Credentials go into a local `.env` file (never pushed to GitHub). When adding new FastAPI apps or CLI commands, import helpers from `app.config` so secrets remain centralized.
+## Operational Notes
+- The repository ignores `.xlsx`, `.csv`, `.env`, and everything inside `uploads/`; never commit real student or teacher data.
+- Always configure MariaDB with `utf8mb4` to handle Chinese characters, emoji, and future multilingual content.
+- Ensure `local_infile` is enabled on both server and client connections so `LOAD DATA LOCAL INFILE` operates correctly.
+- Rotate database credentials periodically and share `.env` values securely.
+- Housekeeping: the upload storage directory (`UPLOAD_STORAGE_DIR` or `./uploads`) is append-only. Schedule periodic cleanup
+  of staged files after they have been ingested to reclaim space. Size the volume based on `UPLOAD_MAX_FILE_SIZE_BYTES`,
+  expected concurrency on `UPLOAD_QUEUE_NAME`, and the configured `UPLOAD_MAX_ROWS` so temporary storage does not exhaust the
+  host.
+
+## Roadmap
+1. **Additional workbook types** – attendance, activities, awards, and counseling records with dedicated staging tables.
+2. **FastAPI service** – browser-based uploader with progress dashboards powered by the job store.
+3. **Automated normalization** – background workers to transform staging data into fully relational models (`students`,
+   `teachers`, `subjects`, etc.).
+4. **Observability** – structured logging, metrics, and alerting for ingestion failures.
+5. **Containerization** – Docker images + compose files for consistent deployments.
+6. **Data governance** – configurable retention policies for uploads, rejected rows, and job history.
+
+## Contributing
+1. Fork and clone the repository.
+2. Create a virtual environment and install dependencies.
+3. Run `pytest` before submitting pull requests.
+4. Follow the lexicographic migration convention when adding new SQL files.
+5. Document new workflows in this README so operations remain reproducible.

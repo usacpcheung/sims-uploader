@@ -252,6 +252,75 @@ class _DDLTrackingConnection:
         self.closed = True
 
 
+class _MissingInfoSchemaCursor:
+    def __init__(self, connection):
+        self._connection = connection
+        self._rows: list[dict[str, object]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self._connection.commands.append((query, params))
+        statement = query.strip()
+        upper = statement.upper()
+        if upper.startswith("SELECT COLUMN_NAME"):
+            if not self._connection.table_created:
+                self._rows = []
+            else:
+                self._rows = [
+                    {
+                        "COLUMN_NAME": "id",
+                        "IS_NULLABLE": "NO",
+                        "COLUMN_DEFAULT": None,
+                        "COLUMN_TYPE": "bigint(20) unsigned",
+                    },
+                    {
+                        "COLUMN_NAME": "file_hash",
+                        "IS_NULLABLE": "NO",
+                        "COLUMN_DEFAULT": None,
+                        "COLUMN_TYPE": "char(64)",
+                    },
+                    {
+                        "COLUMN_NAME": "日期",
+                        "IS_NULLABLE": "NO",
+                        "COLUMN_DEFAULT": None,
+                        "COLUMN_TYPE": "date",
+                    },
+                ]
+        elif upper.startswith("CREATE TABLE"):
+            self._connection.table_created = True
+            self._rows = []
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _MissingInfoSchemaConnection:
+    def __init__(self):
+        self.commands: list[tuple[str, object]] = []
+        self.table_created = False
+        self.commits = 0
+        self.closed = False
+
+    def cursor(self, *args, **kwargs):
+        return _MissingInfoSchemaCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        self.closed = True
+
+
 class PrepExcelSchemaTests(unittest.TestCase):
     def setUp(self):
         prep_excel._get_sheet_config.cache_clear()
@@ -351,6 +420,33 @@ class PrepExcelSchemaTests(unittest.TestCase):
             schema_connection._cursor.executed[-1][1],
             (prep_excel.DB["database"], "teach_record_raw"),
         )
+
+    def test_ensure_staging_columns_creates_table_when_information_schema_empty(self):
+        connection = _MissingInfoSchemaConnection()
+        headers = ["日期"]
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": ["id", "file_hash"],
+            "metadata_column_order": ["id", "file_hash"],
+            "required_columns": ["日期"],
+            "required_column_order": ["日期"],
+            "column_types": {"日期": "DATE NOT NULL"},
+        }
+
+        schema_changed = prep_excel._ensure_staging_columns(
+            headers=headers,
+            config=config,
+            connection=connection,
+        )
+
+        self.assertTrue(schema_changed)
+        self.assertTrue(connection.table_created)
+        self.assertEqual(connection.commits, 1)
+        self.assertGreaterEqual(len(connection.commands), 2)
+        select_query, _ = connection.commands[0]
+        create_query, _ = connection.commands[1]
+        self.assertIn("SELECT COLUMN_NAME", select_query)
+        self.assertIn("CREATE TABLE", create_query)
 
     def test_get_table_config_supports_multiple_workbook_types(self):
         rows = [

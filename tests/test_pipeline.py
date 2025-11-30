@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import datetime as dt
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pymysql
@@ -113,12 +114,20 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
 
     inserted = {}
 
-    def fake_insert(connection_obj, table, rows, column_mappings, **kwargs):
+    def fake_insert(
+        connection_obj,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared,
+    ):
         inserted["table"] = table
-        inserted["rows"] = rows
-        inserted["column_mappings"] = column_mappings
-        inserted["kwargs"] = kwargs
-        return len(rows)
+        inserted["prepared"] = prepared
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -129,6 +138,15 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
         pipeline.normalize_staging,
         "ensure_normalized_schema",
         lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
     )
 
     def fake_mark(connection_obj, table, row_ids, *, file_hash):
@@ -153,15 +171,18 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert captured.prep_call["workbook"] == "workbook.xlsx"
     assert captured.prep_call["workbook_type"] == "default"
     assert inserted["table"] == "teach_record_normalized"
-    assert inserted["column_mappings"] == {"姓名": "姓名"}
+    assert len(inserted["prepared"].normalized_rows) == len(staged_rows)
     assert captured.mark_call["file_hash"] == file_hash
     assert captured.mark_call["row_ids"] == (1, 2)
     assert result.file_hash == file_hash
     assert result.staged_rows == len(staged_rows)
     assert result.normalized_rows == len(staged_rows)
+    assert result.inserted_count == len(staged_rows)
     assert result.batch_id == "batch-1"
     assert result.staging_table == "teach_record_raw"
     assert result.normalized_table == "teach_record_normalized"
+    assert result.rejected_rows_path is None
+    assert result.validation_errors == []
     assert not result.skipped
     assert connection.committed
     assert not connection.rolled_back
@@ -222,22 +243,40 @@ def test_run_pipeline_passes_normalization_overrides(monkeypatch):
 
     captured = {}
 
-    def fake_resolve(rows, column_mappings, **kwargs):
-        captured["resolve"] = kwargs
-        return {"Custom": "Custom"}
+    prepared = pipeline.normalize_staging.PreparedNormalization(
+        normalized_rows=[("meta", 1, "hash", "value")],
+        rejected_rows=[],
+        resolved_mappings=OrderedDict({"Custom": "Custom"}),
+        metadata_columns=metadata_override,
+        ordered_columns=metadata_override + ("Custom",),
+    )
+
+    def fake_prepare(rows, column_mappings, **kwargs):
+        captured["prepare"] = kwargs
+        return prepared
 
     def fake_ensure(connection_obj, table, mappings, column_types, **kwargs):
         captured["ensure"] = kwargs
         return True
 
-    def fake_insert(connection_obj, table, rows, column_mappings, **kwargs):
-        captured["insert"] = kwargs
-        return len(rows)
+    def fake_insert(
+        connection_obj,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared: pipeline.normalize_staging.PreparedNormalization,
+    ):
+        captured["insert"] = {"prepared": prepared}
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
-        "resolve_column_mappings",
-        fake_resolve,
+        "prepare_normalization",
+        fake_prepare,
     )
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -254,17 +293,25 @@ def test_run_pipeline_passes_normalization_overrides(monkeypatch):
         "mark_staging_rows_processed",
         lambda *args, **kwargs: dt.datetime(2024, 7, 1, 10, tzinfo=dt.timezone.utc),
     )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prep, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prep,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
 
     result = pipeline.run_pipeline(
         "workbook.xlsx", source_year="2024", batch_id="batch-override"
     )
 
-    assert captured["resolve"]["metadata_columns"] == metadata_override
-    assert captured["resolve"]["reserved_source_columns"] == reserved_override
+    assert captured["prepare"]["metadata_columns"] == metadata_override
+    assert captured["prepare"]["reserved_source_columns"] == reserved_override
     assert captured["ensure"]["metadata_columns"] == metadata_override
     assert captured["ensure"]["column_type_overrides"] == type_overrides
-    assert captured["insert"]["metadata_columns"] == metadata_override
-    assert captured["insert"]["reserved_source_columns"] == reserved_override
+    assert captured["insert"]["prepared"] is prepared
     assert result.normalized_rows == len(staged_rows)
     assert connection.committed
 
@@ -335,18 +382,26 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
     monkeypatch.setattr(pipeline.pymysql, "connect", lambda **kwargs: connection)
 
     inserted = {}
+
+    def fake_insert(
+        conn,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared,
+    ):
+        inserted["table"] = table
+        inserted["prepared"] = prepared
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
+
     monkeypatch.setattr(
         pipeline.normalize_staging,
         "insert_normalized_rows",
-        lambda conn, table, rows, column_mappings, **kwargs: inserted.update(
-            {
-                "table": table,
-                "rows": rows,
-                "column_mappings": column_mappings,
-                "kwargs": kwargs,
-            }
-        )
-        or len(rows),
+        fake_insert,
     )
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -371,10 +426,19 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
         "mark_staging_rows_processed",
         fake_mark,
     )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
-    assert inserted["rows"] == staged_rows
+    assert len(inserted["prepared"].normalized_rows) == len(staged_rows)
     assert result.normalized_rows == len(staged_rows)
     assert marked["row_ids"] == (1, 2)
     assert marked["file_hash"] == file_hash
@@ -469,19 +533,27 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
     pipeline.prep_excel._get_sheet_config.cache_clear()
     inserted = {}
 
-    def fake_insert(connection_obj, table, rows, column_mappings, **kwargs):
+    def fake_insert(
+        connection_obj,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared,
+    ):
         inserted["table"] = table
-        inserted["rows"] = rows
-        inserted["column_mappings"] = column_mappings
-        inserted["kwargs"] = kwargs
-        return len(rows)
+        inserted["prepared"] = prepared
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
         "insert_normalized_rows",
         fake_insert,
     )
-    
+
     monkeypatch.setattr(
         pipeline.normalize_staging,
         "mark_staging_rows_processed",
@@ -492,13 +564,22 @@ def test_run_pipeline_falls_back_when_config_lacks_column_mappings(
         "ensure_normalized_schema",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
     assert len(config_connection.cursor_obj.queries) == 2
     assert "column_mappings" in config_connection.cursor_obj.queries[0]
     assert "column_mappings" not in config_connection.cursor_obj.queries[1]
-    assert inserted["column_mappings"] == OrderedDict()
+    assert inserted["prepared"].resolved_mappings == OrderedDict()
     assert inserted["table"] == "teach_record_normalized"
     assert result.normalized_rows == len(staged_rows)
     assert result.normalized_table == "teach_record_normalized"
@@ -557,12 +638,20 @@ def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
 
     inserted = {}
 
-    def fake_insert(connection_obj, table, rows, column_mappings, **kwargs):
+    def fake_insert(
+        connection_obj,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared,
+    ):
         inserted["table"] = table
-        inserted["rows"] = rows
-        inserted["column_mappings"] = column_mappings
-        inserted["kwargs"] = kwargs
-        return len(rows)
+        inserted["prepared"] = prepared
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -580,10 +669,20 @@ def test_run_pipeline_uses_derived_normalized_table(monkeypatch):
         "ensure_normalized_schema",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
     assert inserted["table"] == "teach_record_normalized"
+    assert len(inserted["prepared"].normalized_rows) == len(staged_rows)
     assert result.normalized_table == "teach_record_normalized"
     assert result.staging_table == "teach_record_raw"
     assert result.normalized_rows == len(staged_rows)
@@ -655,12 +754,20 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
 
     inserted = {}
 
-    def fake_insert(connection_obj, table, rows, column_mappings, **kwargs):
+    def fake_insert(
+        connection_obj,
+        table,
+        rows,
+        column_mappings=None,
+        *,
+        prepared,
+    ):
         inserted["table"] = table
-        inserted["rows"] = rows
-        inserted["column_mappings"] = column_mappings
-        inserted["kwargs"] = kwargs
-        return len(rows)
+        inserted["prepared"] = prepared
+        return pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=len(prepared.normalized_rows),
+            prepared=prepared,
+        )
 
     monkeypatch.setattr(
         pipeline.normalize_staging,
@@ -673,6 +780,15 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
         "mark_staging_rows_processed",
         lambda *args, **kwargs: dt.datetime(2024, 9, 1, 1, tzinfo=dt.timezone.utc),
     )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
 
     result = pipeline.run_pipeline("workbook.xlsx", source_year="2024")
 
@@ -680,59 +796,53 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
     assert "教學跟進/回饋" in ensured["columns"]
     assert ensured["column_types"]["教學跟進/回饋"] == "TEXT NULL"
     assert inserted["table"] == "teach_record_normalized"
-    assert inserted["column_mappings"]["教學跟進/回饋"] == "教學跟進/回饋"
     assert (
-        inserted["rows"][0]["教學跟進/回饋"]
-        == "Long feedback text"
+        inserted["prepared"].resolved_mappings["教學跟進/回饋"]
+        == "教學跟進/回饋"
     )
+    row_dict = dict(
+        zip(
+            inserted["prepared"].ordered_columns,
+            inserted["prepared"].normalized_rows[0],
+        )
+    )
+    assert row_dict["教學跟進/回饋"] == "Long feedback text"
     assert result.normalized_rows == 1
     assert connection.committed
 
 
-def test_cli_invokes_pipeline(monkeypatch, capsys):
-    result = pipeline.PipelineResult(
-        file_hash="hash-xyz",
-        staging_table="teach_record_raw",
-        normalized_table="teach_record_normalized",
-        staged_rows=2,
-        normalized_rows=2,
-        batch_id="batch-9",
-        ingested_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
-        processed_at=dt.datetime(2024, 5, 1, 12, tzinfo=dt.timezone.utc),
-    )
+def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
+    workbook = tmp_path / "workbook.xlsx"
+    workbook.write_bytes(b"data")
 
     captured_args = {}
 
-    def fake_run(
-        workbook, sheet, *, workbook_type, source_year, batch_id, db_settings=None
-    ):
-        captured_args.update(
-            {
-                "workbook": workbook,
-                "sheet": sheet,
-                "workbook_type": workbook_type,
-                "source_year": source_year,
-                "batch_id": batch_id,
-                "db_settings": db_settings,
-            }
-        )
-        return result
+    def fake_enqueue_job(**kwargs):
+        captured_args.update(kwargs)
+        return "job-123", object()
 
-    monkeypatch.setattr(pipeline, "run_pipeline", fake_run)
+    monkeypatch.setattr("app.job_runner.enqueue_job", fake_enqueue_job)
 
     returned = pipeline.cli(
-        ["workbook.xlsx", "SheetA", "--source-year", "2024", "--batch-id", "batch-9"]
+        [
+            str(workbook),
+            "SheetA",
+            "--source-year",
+            "2024",
+            "--batch-id",
+            "batch-9",
+        ]
     )
 
     out = capsys.readouterr().out
-    assert "Staged" in out
+    assert "Queued upload job job-123" in out
+    assert returned == "job-123"
     assert captured_args == {
-        "workbook": "workbook.xlsx",
+        "workbook_path": str(workbook),
         "sheet": "SheetA",
         "workbook_type": "default",
         "source_year": "2024",
         "batch_id": "batch-9",
-        "db_settings": None,
+        "file_size": workbook.stat().st_size,
     }
-    assert returned is result
 
