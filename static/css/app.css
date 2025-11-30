@@ -51,6 +51,12 @@ main {
   transition: background-color 0.2s ease, transform 0.2s ease;
 }
 
+.site-nav a.active {
+  background-color: #fff;
+  color: #1d4ed8;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+}
+
 .site-nav a:hover,
 .site-nav a:focus {
   background-color: rgba(255, 255, 255, 0.35);
@@ -77,6 +83,17 @@ main {
 
 .panel h2 {
   margin-top: 0;
+}
+
+.panel__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  align-items: baseline;
+}
+
+.muted {
+  color: rgba(31, 41, 55, 0.7);
 }
 
 .form-grid {
@@ -158,8 +175,122 @@ button.primary-button:focus {
   }
 
   .alert--error {
-    background-color: rgba(248, 113, 113, 0.12);
-    border-color: rgba(248, 113, 113, 0.45);
+  background-color: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+  }
+}
+
+.table-wrapper {
+  margin-top: 1.5rem;
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 0.75rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.data-table th {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(31, 41, 55, 0.8);
+}
+
+.data-table code {
+  background-color: rgba(37, 99, 235, 0.08);
+  border-radius: 6px;
+  padding: 0.2rem 0.35rem;
+  display: inline-block;
+}
+
+.table-state {
+  padding: 1rem 1.25rem;
+  background-color: rgba(15, 23, 42, 0.04);
+  border-radius: 8px;
+  border: 1px dashed rgba(15, 23, 42, 0.1);
+  color: rgba(31, 41, 55, 0.8);
+}
+
+.table-state--error {
+  background-color: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #991b1b;
+}
+
+.table-state--empty {
+  color: rgba(31, 41, 55, 0.75);
+}
+
+.job-layout section + section {
+  margin-top: 1.5rem;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.metadata-grid dt {
+  font-weight: 600;
+}
+
+.metadata-grid dd {
+  margin: 0.25rem 0 0;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+
+[data-events-list] {
+  padding-left: 1.25rem;
+  line-height: 1.8;
+}
+
+@media (prefers-color-scheme: dark) {
+  .site-nav a.active {
+    background-color: #c7d2fe;
+    color: #0b1727;
+  }
+
+  .muted {
+    color: rgba(226, 232, 240, 0.75);
+  }
+
+  .data-table th,
+  .data-table td {
+    border-bottom-color: rgba(148, 163, 184, 0.25);
+  }
+
+  .data-table th {
+    color: rgba(226, 232, 240, 0.8);
+  }
+
+  .data-table code {
+    background-color: rgba(99, 102, 241, 0.25);
+  }
+
+  .table-state {
+    background-color: rgba(148, 163, 184, 0.08);
+    border-color: rgba(148, 163, 184, 0.2);
+    color: rgba(226, 232, 240, 0.9);
+  }
+
+  .table-state--error {
     color: #fecaca;
   }
 }
