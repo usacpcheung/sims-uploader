@@ -1,3 +1,11 @@
+-- Configuration contract for worksheet ingestion:
+-- * workbook_type      : logical pipeline name; defaults to "default".
+-- * sheet_name         : Excel tab name to normalize.
+-- * staging_table      : raw landing table for the sheet.
+-- * metadata_columns   : JSON array of columns appended by the pipeline (id, hash, batch, timestamps).
+-- * required_columns   : JSON array of cleaned headers that must be present in the worksheet.
+-- * column_mappings    : JSON object mapping raw headers -> staging column names.
+-- * options            : JSON object for extra flags (e.g., normalized_table, column_types, rename_last_subject).
 CREATE TABLE IF NOT EXISTS sheet_ingest_config (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     workbook_type VARCHAR(255) NOT NULL DEFAULT 'default',
@@ -175,3 +183,13 @@ ON DUPLICATE KEY UPDATE
     required_columns = VALUES(required_columns),
     column_mappings = VALUES(column_mappings),
     options = VALUES(options);
+
+-- TODO (pending workbook upload):
+-- Add a new VALUES block for the latest Excel template once the file is available in ./uploads.
+-- Capture:
+--   - workbook_type: descriptive pipeline key for this template.
+--   - sheet_name: exact tab names to ingest (multiple rows allowed for multi-sheet workbooks).
+--   - staging_table: raw landing table name (snake_case, suffixed with _raw).
+--   - required_columns: cleaned header list from the sheet; keep ordering from the source.
+--   - column_mappings: JSON_OBJECT of source header -> staging column name.
+--   - options: include normalized_table plus column_types overrides for long text/date columns.
