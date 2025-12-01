@@ -85,7 +85,10 @@ def _normalize_header(value: str, index: int) -> str:
     if not value:
         return f"column_{index + 1}"
     value = value.strip().lower()
-    value = re.sub(r"[^0-9a-zA-Z]+", "_", value)
+    # Preserve Unicode word characters so non-Latin headers remain readable
+    # (e.g., Chinese column names). Replace any non-word character groups with
+    # underscores to keep the output snake_case friendly.
+    value = re.sub(r"[^\w]+", "_", value, flags=re.UNICODE)
     value = re.sub(r"_+", "_", value).strip("_")
     return value or f"column_{index + 1}"
 
