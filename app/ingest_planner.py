@@ -8,7 +8,10 @@ Usage examples:
 
 The script reads the provided workbook without modifying it, identifies the first
 non-empty header row per sheet, and writes a JSON summary containing the sheet
-name, cleaned header values, and suggested snake_case staging column names.
+name, cleaned header values, suggested snake_case staging column names, and
+inferred column types. With ``--emit-sql`` it also writes a reviewable
+``sheet_ingest_config`` INSERT script that mirrors the JSON payload so operators
+can paste entries directly into the configuration table.
 """
 from __future__ import annotations
 
@@ -339,6 +342,8 @@ def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
         (str(column), str(sql_type), False) for column, sql_type in column_types.items()
     ]
 
+    # options currently include normalized_table and column_types; keep this builder
+    # tolerant so additional keys can be added without reworking SQL escaping logic.
     options_pairs = [
         ("normalized_table", str(sheet.get("options", {}).get("normalized_table", "")), False),
         ("column_types", _json_object_sql(column_types_pairs), True),
