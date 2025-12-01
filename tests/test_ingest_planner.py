@@ -29,6 +29,8 @@ class SummarizeSheetTests(unittest.TestCase):
             workbook_component="workbook",
             staging_template=ingest_planner.DEFAULT_STAGING_TABLE_TEMPLATE,
             normalized_template=ingest_planner.DEFAULT_NORMALIZED_TABLE_TEMPLATE,
+            sample_rows=ingest_planner.DEFAULT_SAMPLE_ROWS,
+            overrides={},
         )
 
         self.assertEqual(summary["header_row_index"], 0)
@@ -38,7 +40,17 @@ class SummarizeSheetTests(unittest.TestCase):
         )
         self.assertEqual(summary["metadata_columns"], ingest_planner.METADATA_COLUMNS)
         self.assertEqual(summary["staging_table"], "workbook_學生資料_raw")
-        self.assertEqual(summary["options"], {"normalized_table": "workbook_學生資料"})
+        self.assertEqual(
+            summary["options"],
+            {
+                "normalized_table": "workbook_學生資料",
+                "column_types": {
+                    "學生編號": "INTEGER NULL",
+                    "姓名": "VARCHAR(255) NULL",
+                    "出生日期": "DATE NULL",
+                },
+            },
+        )
 
 
 class TableNamingTests(unittest.TestCase):
@@ -50,11 +62,17 @@ class TableNamingTests(unittest.TestCase):
             workbook_component="ExampleWorkbook",
             staging_template=ingest_planner.DEFAULT_STAGING_TABLE_TEMPLATE,
             normalized_template=ingest_planner.DEFAULT_NORMALIZED_TABLE_TEMPLATE,
+            sample_rows=ingest_planner.DEFAULT_SAMPLE_ROWS,
+            overrides={},
         )
 
         self.assertEqual(summary["staging_table"], "exampleworkbook_my_sheet_raw")
         self.assertEqual(
-            summary["options"], {"normalized_table": "exampleworkbook_my_sheet"}
+            summary["options"],
+            {
+                "normalized_table": "exampleworkbook_my_sheet",
+                "column_types": {"col1": "VARCHAR(255) NULL"},
+            },
         )
 
     def test_custom_templates_override_defaults(self):
@@ -65,10 +83,50 @@ class TableNamingTests(unittest.TestCase):
             workbook_component="book",
             staging_template="custom_{sheet}_stage",
             normalized_template="norm_{workbook}_{sheet}",
+            sample_rows=ingest_planner.DEFAULT_SAMPLE_ROWS,
+            overrides={},
         )
 
         self.assertEqual(summary["staging_table"], "custom_data_tab_stage")
-        self.assertEqual(summary["options"], {"normalized_table": "norm_book_data_tab"})
+        self.assertEqual(
+            summary["options"],
+            {
+                "normalized_table": "norm_book_data_tab",
+                "column_types": {"col1": "VARCHAR(255) NULL"},
+            },
+        )
+
+
+class ColumnTypeInferenceTests(unittest.TestCase):
+    def test_infers_date_and_long_text_and_numeric(self):
+        df = pd.DataFrame(
+            [
+                ["日期", "描述", "數量"],
+                ["2024-01-01", "短", 1],
+                ["2024/02/02", "a" * 300, 2.5],
+            ]
+        )
+
+        summary = ingest_planner.summarize_sheet(
+            "資料", df, "book", "{workbook}_{sheet}_raw", "{workbook}_{sheet}", 10, {}
+        )
+
+        self.assertEqual(
+            summary["options"]["column_types"],
+            {
+                "日期": "DATE NULL",
+                "描述": "TEXT NULL",
+                "數量": "NUMERIC NULL",
+            },
+        )
+
+    def test_overrides_replace_inference(self):
+        df = pd.DataFrame([["日期", "描述"], ["2024-01-01", "text"]])
+        summary = ingest_planner.summarize_sheet(
+            "資料", df, "book", "{workbook}_{sheet}_raw", "{workbook}_{sheet}", 10, {"描述": "VARCHAR(100) NULL"}
+        )
+
+        self.assertEqual(summary["options"]["column_types"]["描述"], "VARCHAR(100) NULL")
 
 
 if __name__ == "__main__":
