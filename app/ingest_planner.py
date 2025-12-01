@@ -99,6 +99,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "出生日期:'DATE NULL'). Can be provided multiple times."
         ),
     )
+    parser.add_argument(
+        "--workbook-type",
+        default="default",
+        help="Workbook type to use when emitting SQL inserts (defaults to 'default').",
+    )
+    parser.add_argument(
+        "--emit-sql",
+        action="store_true",
+        help=(
+            "Also write a sheet_ingest_config INSERT snippet next to the JSON plan "
+            "for review."
+        ),
+    )
+    parser.add_argument(
+        "--sql-output",
+        type=Path,
+        help=(
+            "Explicit path for the generated SQL (used with --emit-sql). Defaults to "
+            "<workbook>_sheet_ingest_config.sql beside the workbook."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -212,6 +233,25 @@ def _format_table_name(template: str, workbook_component: str, sheet_component: 
     return template.format(workbook=workbook_component, sheet=sheet_component)
 
 
+def _sql_escape(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _json_array_sql(values: Iterable[str]) -> str:
+    escaped = ", ".join(f"'{_sql_escape(v)}'" for v in values)
+    return f"JSON_ARRAY({escaped})"
+
+
+def _json_object_sql(pairs: Iterable[tuple[str, str, bool]]) -> str:
+    parts: list[str] = []
+    for key, value, is_raw in pairs:
+        key_sql = f"'{_sql_escape(key)}'"
+        value_sql = value if is_raw else f"'{_sql_escape(value)}'"
+        parts.append(f"{key_sql}, {value_sql}")
+    joined = ", ".join(parts)
+    return f"JSON_OBJECT({joined})"
+
+
 def summarize_sheet(
     sheet_name: str,
     df: pd.DataFrame,
@@ -285,6 +325,71 @@ def load_workbook(
     return summaries
 
 
+def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
+    metadata = sheet.get("metadata_columns", [])
+    headers = sheet.get("clean_headers", [])
+    staging_cols = sheet.get("suggested_staging_columns", [])
+
+    column_mappings_pairs: list[tuple[str, str, bool]] = []
+    for raw, staged in zip(headers, staging_cols):
+        column_mappings_pairs.append((str(raw), str(staged), False))
+
+    column_types = sheet.get("options", {}).get("column_types", {})
+    column_types_pairs = [
+        (str(column), str(sql_type), False) for column, sql_type in column_types.items()
+    ]
+
+    options_pairs = [
+        ("normalized_table", str(sheet.get("options", {}).get("normalized_table", "")), False),
+        ("column_types", _json_object_sql(column_types_pairs), True),
+    ]
+
+    return "\n    (\n" + "\n".join(
+        [
+            f"        '{_sql_escape(workbook_type)}',",
+            f"        '{_sql_escape(str(sheet.get('sheet_name', '')))}',",
+            f"        '{_sql_escape(str(sheet.get('staging_table', '')))}',",
+            f"        {_json_array_sql(metadata)},",
+            f"        {_json_array_sql(headers)},",
+            f"        {_json_object_sql(column_mappings_pairs)},",
+            f"        {_json_object_sql(options_pairs)}",
+        ]
+    ) + "\n    )"
+
+
+def build_ingest_config_sql(plan: dict[str, object], workbook_type: str = "default") -> str:
+    sheets: list[dict[str, object]] = plan.get("sheets", []) if plan else []
+    if not sheets:
+        raise ValueError("Plan is missing sheets to generate SQL")
+
+    values_blocks = [
+        _build_value_block(sheet, workbook_type=workbook_type) for sheet in sheets
+    ]
+
+    header = (
+        "INSERT INTO sheet_ingest_config (\n"
+        "    workbook_type,\n"
+        "    sheet_name,\n"
+        "    staging_table,\n"
+        "    metadata_columns,\n"
+        "    required_columns,\n"
+        "    column_mappings,\n"
+        "    options\n"
+        ")\nVALUES"
+    )
+
+    footer = (
+        "ON DUPLICATE KEY UPDATE\n"
+        "    staging_table = VALUES(staging_table),\n"
+        "    metadata_columns = VALUES(metadata_columns),\n"
+        "    required_columns = VALUES(required_columns),\n"
+        "    column_mappings = VALUES(column_mappings),\n"
+        "    options = VALUES(options);"
+    )
+
+    return header + ",".join(values_blocks) + "\n" + footer + "\n"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.workbook.exists():
@@ -322,6 +427,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(f"Wrote ingest plan to {output_path}")
+
+    if args.emit_sql:
+        sql_path = args.sql_output
+        if sql_path is None:
+            sql_path = args.workbook.with_name(
+                f"{args.workbook.stem}_sheet_ingest_config.sql"
+            )
+        sql = build_ingest_config_sql(payload, workbook_type=args.workbook_type)
+        sql_path.write_text(sql, encoding="utf-8")
+        print(f"Wrote sheet_ingest_config SQL to {sql_path}")
     return 0
 
 

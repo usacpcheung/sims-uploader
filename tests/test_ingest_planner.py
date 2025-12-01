@@ -129,5 +129,49 @@ class ColumnTypeInferenceTests(unittest.TestCase):
         self.assertEqual(summary["options"]["column_types"]["描述"], "VARCHAR(100) NULL")
 
 
+class SqlGenerationTests(unittest.TestCase):
+    def test_builds_insert_for_multiple_sheets(self):
+        plan = {
+            "workbook": "Book.xlsx",
+            "workbook_path": "/tmp/Book.xlsx",
+            "sheets": [
+                {
+                    "sheet_name": "SheetA",
+                    "staging_table": "book_sheeta_raw",
+                    "metadata_columns": ingest_planner.METADATA_COLUMNS,
+                    "clean_headers": ["學生編號", "姓名"],
+                    "suggested_staging_columns": ["學生編號", "姓名"],
+                    "options": {
+                        "normalized_table": "book_sheeta",
+                        "column_types": {"學生編號": "INTEGER NULL", "姓名": "VARCHAR(255) NULL"},
+                    },
+                },
+                {
+                    "sheet_name": "SheetB",
+                    "staging_table": "book_sheetb_raw",
+                    "metadata_columns": ingest_planner.METADATA_COLUMNS,
+                    "clean_headers": ["日期"],
+                    "suggested_staging_columns": ["日期"],
+                    "options": {
+                        "normalized_table": "book_sheetb",
+                        "column_types": {"日期": "DATE NULL"},
+                    },
+                },
+            ],
+        }
+
+        sql = ingest_planner.build_ingest_config_sql(plan, workbook_type="custom_type")
+
+        self.assertIn("INSERT INTO sheet_ingest_config", sql)
+        self.assertIn("custom_type", sql)
+        self.assertIn("book_sheeta_raw", sql)
+        self.assertIn("book_sheetb_raw", sql)
+        self.assertIn("JSON_ARRAY('學生編號', '姓名')", sql)
+        self.assertIn("JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名')", sql)
+        self.assertIn("JSON_OBJECT('normalized_table', 'book_sheetb'", sql)
+        self.assertIn("JSON_OBJECT('日期', 'DATE NULL')", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+
+
 if __name__ == "__main__":
     unittest.main()

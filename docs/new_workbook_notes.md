@@ -9,3 +9,11 @@ The latest Excel template was not present in the repository or `./uploads/`, so 
 5. **Metadata** – include standard metadata columns (`id`, `file_hash`, `batch_id`, `source_year`, `ingested_at`, `processed_at`).
 
 Add a new `VALUES` block to [`sql/sheet_ingest_config.sql`](../sql/sheet_ingest_config.sql) once the workbook fields are known.
+
+The `ingest_planner` CLI can draft this SQL for you:
+
+```bash
+python app/ingest_planner.py uploads/<workbook>.xlsx --emit-sql --workbook-type <type>
+```
+
+It writes both the JSON plan and a `*_sheet_ingest_config.sql` snippet beside the workbook for review.
