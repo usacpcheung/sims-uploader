@@ -22,6 +22,16 @@ from typing import Iterable, Sequence
 import pandas as pd
 
 DEFAULT_OUTPUT_SUFFIX = "_ingest_plan.json"
+DEFAULT_STAGING_TABLE_TEMPLATE = "{workbook}_{sheet}_raw"
+DEFAULT_NORMALIZED_TABLE_TEMPLATE = "{workbook}_{sheet}"
+METADATA_COLUMNS = [
+    "id",
+    "file_hash",
+    "batch_id",
+    "source_year",
+    "ingested_at",
+    "processed_at",
+]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -50,6 +60,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Where to write the JSON summary. Defaults to <workbook>_ingest_plan.json"
             " next to the input file."
+        ),
+    )
+    parser.add_argument(
+        "--staging-table-template",
+        default=DEFAULT_STAGING_TABLE_TEMPLATE,
+        help=(
+            "Pattern for suggested staging table names. Use {workbook} and {sheet}"
+            " placeholders; defaults to '{workbook}_{sheet}_raw'."
+        ),
+    )
+    parser.add_argument(
+        "--normalized-table-template",
+        default=DEFAULT_NORMALIZED_TABLE_TEMPLATE,
+        help=(
+            "Pattern for suggested normalized table names stored in options. Use"
+            " {workbook} and {sheet} placeholders; defaults to"
+            " '{workbook}_{sheet}'."
         ),
     )
     return parser.parse_args(argv)
@@ -93,6 +120,12 @@ def _normalize_header(value: str, index: int) -> str:
     return value or f"column_{index + 1}"
 
 
+def _normalize_table_component(value: str) -> str:
+    normalized = re.sub(r"[^\w]+", "_", value.lower(), flags=re.UNICODE)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "table"
+
+
 def _dedupe(headers: Iterable[str]) -> list[str]:
     seen: dict[str, int] = {}
     unique: list[str] = []
@@ -108,27 +141,62 @@ def _dedupe(headers: Iterable[str]) -> list[str]:
     return unique
 
 
-def summarize_sheet(sheet_name: str, df: pd.DataFrame) -> dict[str, object]:
+def _format_table_name(template: str, workbook_component: str, sheet_component: str) -> str:
+    return template.format(workbook=workbook_component, sheet=sheet_component)
+
+
+def summarize_sheet(
+    sheet_name: str,
+    df: pd.DataFrame,
+    workbook_component: str,
+    staging_template: str,
+    normalized_template: str,
+) -> dict[str, object]:
+    workbook_component = _normalize_table_component(workbook_component)
     header_row, raw_headers = _first_non_empty_row(df)
     cleaned_headers = _trim_trailing_empty(raw_headers)
     staged = _dedupe(
         _normalize_header(value, idx) for idx, value in enumerate(cleaned_headers)
     )
+    sheet_component = _normalize_table_component(sheet_name)
     return {
         "sheet_name": sheet_name,
         "header_row_index": header_row,
         "clean_headers": cleaned_headers,
         "suggested_staging_columns": staged,
+        "staging_table": _format_table_name(
+            staging_template, workbook_component, sheet_component
+        ),
+        "metadata_columns": METADATA_COLUMNS,
+        "options": {
+            "normalized_table": _format_table_name(
+                normalized_template, workbook_component, sheet_component
+            )
+        },
     }
 
 
-def load_workbook(path: Path, include_sheets: list[str] | None = None) -> list[dict[str, object]]:
+def load_workbook(
+    path: Path,
+    include_sheets: list[str] | None = None,
+    staging_template: str = DEFAULT_STAGING_TABLE_TEMPLATE,
+    normalized_template: str = DEFAULT_NORMALIZED_TABLE_TEMPLATE,
+) -> list[dict[str, object]]:
     frames = pd.read_excel(path, sheet_name=None, header=None, dtype=object)
     summaries: list[dict[str, object]] = []
+    workbook_component = _normalize_table_component(path.stem)
     for name, df in frames.items():
         if include_sheets and name not in include_sheets:
             continue
-        summaries.append(summarize_sheet(name, df))
+        summaries.append(
+            summarize_sheet(
+                name,
+                df,
+                workbook_component=workbook_component,
+                staging_template=staging_template,
+                normalized_template=normalized_template,
+            )
+        )
     return summaries
 
 
@@ -139,7 +207,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     include_sheets = args.sheets if args.sheets else None
-    summaries = load_workbook(args.workbook, include_sheets=include_sheets)
+    summaries = load_workbook(
+        args.workbook,
+        include_sheets=include_sheets,
+        staging_template=args.staging_table_template,
+        normalized_template=args.normalized_table_template,
+    )
 
     if not summaries:
         print("No sheets processed. Check the sheet names or workbook content.", file=sys.stderr)
