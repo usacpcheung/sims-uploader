@@ -127,6 +127,14 @@ The worker path wraps preparation, staging, normalization, and validation:
 - Status updates (`Queued` → `Parsing` → `Validating` → `Loaded`/`Errors`) are captured in `upload_job_events`.
 - Validation failures mark the job as `Errors` and surface a summary in both the API and UI.
 
+### 4. Plan new workbook ingest configuration
+```bash
+python app/ingest_planner.py uploads/your_file.xlsx --emit-sql --workbook-type <type>
+```
+- Scans each sheet to capture cleaned headers, suggested staging columns, metadata columns, and inferred column types.
+- Produces a JSON plan next to the workbook (override with `-o <path>`) and, with `--emit-sql`, writes a `*_sheet_ingest_config.sql` snippet for review before updating [`sql/sheet_ingest_config.sql`](sql/sheet_ingest_config.sql).
+- Table names can be templated via `--staging-table-template`/`--normalized-table-template` and column types can be overridden with `--column-type-override COL:TYPE` when the defaults are not suitable.
+
 ## API + Web UI
 Start the FastAPI service with Uvicorn:
 ```bash
