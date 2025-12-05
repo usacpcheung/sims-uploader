@@ -7,6 +7,7 @@ The latest Excel template was not present in the repository or `./uploads/`, so 
 3. **Column mappings** – map raw headers to staging column names (stick to `snake_case`).
 4. **Staging/normalized tables** – pick table names (e.g., `*_raw` and `*_normalized`) and note any `options.column_types` overrides for long text or date columns.
 5. **Metadata** – include standard metadata columns (`id`, `file_hash`, `batch_id`, `source_year`, `ingested_at`, `processed_at`).
+6. **Time ranges** – capture any source columns that represent date/time spans plus their formats; store them in `time_range_column`/`time_range_format` alongside an `overlap_target_table` if overlap checks are required.
 
 Add a new `VALUES` block to [`sql/sheet_ingest_config.sql`](../sql/sheet_ingest_config.sql) once the workbook fields are known. The `ingest_planner` CLI can draft this SQL for you and reduce manual transcription errors:
 

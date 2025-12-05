@@ -144,6 +144,9 @@ class SqlGenerationTests(unittest.TestCase):
                     "options": {
                         "normalized_table": "book_sheeta",
                         "column_types": {"學生編號": "INTEGER NULL", "姓名": "VARCHAR(255) NULL"},
+                        "time_range_column": "日期",
+                        "time_range_format": "%Y/%m/%d",
+                        "overlap_target_table": "calendar_table",
                     },
                 },
                 {
@@ -170,6 +173,8 @@ class SqlGenerationTests(unittest.TestCase):
         self.assertIn("JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名')", sql)
         self.assertIn("JSON_OBJECT('normalized_table', 'book_sheetb'", sql)
         self.assertIn("JSON_OBJECT('日期', 'DATE NULL')", sql)
+        self.assertIn("%Y/%m/%d", sql)
+        self.assertIn("calendar_table", sql)
         self.assertIn("ON DUPLICATE KEY UPDATE", sql)
 
 

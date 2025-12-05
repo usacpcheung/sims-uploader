@@ -482,6 +482,35 @@ class PrepExcelSchemaTests(unittest.TestCase):
         )
         self.assertEqual(config_default["table"], "shared_default_raw")
 
+    def test_get_table_config_exposes_time_range_fields(self):
+        rows = [
+            {
+                "workbook_type": "default",
+                "sheet_name": "Shared",
+                "staging_table": "shared_default_raw",
+                "metadata_columns": json.dumps([]),
+                "required_columns": json.dumps([]),
+                "column_mappings": None,
+                "options": json.dumps(
+                    {
+                        "time_range_column": "日期",
+                        "time_range_format": "%Y/%m/%d",
+                        "overlap_target_table": "calendar_table",
+                    }
+                ),
+            }
+        ]
+
+        connection = _FakeConnection(rows)
+
+        config = prep_excel._get_table_config(
+            "Shared", workbook_type="default", connection=connection
+        )
+
+        self.assertEqual(config["time_range_column"], "日期")
+        self.assertEqual(config["time_range_format"], "%Y/%m/%d")
+        self.assertEqual(config["overlap_target_table"], "calendar_table")
+
     def test_get_table_config_falls_back_to_default_workbook_type(self):
         rows = [
             {
