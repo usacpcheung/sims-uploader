@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS sheet_ingest_config (
     required_columns JSON NOT NULL DEFAULT (JSON_ARRAY()),
     column_mappings JSON NULL,
     options JSON NULL,
+    time_range_column VARCHAR(255) NULL,
+    time_range_format VARCHAR(255) NULL,
+    overlap_target_table VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -28,7 +31,10 @@ INSERT INTO sheet_ingest_config (
     metadata_columns,
     required_columns,
     column_mappings,
-    options
+    options,
+    time_range_column,
+    time_range_format,
+    overlap_target_table
 )
 VALUES
     (
@@ -102,7 +108,10 @@ VALUES
             'rename_last_subject', true,
             'normalized_table', 'teach_record_normalized',
             'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
-        )
+        ),
+        NULL,
+        NULL,
+        NULL
     ),
     (
         'default',
@@ -175,14 +184,20 @@ VALUES
             'rename_last_subject', true,
             'normalized_table', 'teach_record_normalized',
             'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
-        )
+        ),
+        NULL,
+        NULL,
+        NULL
     )
 ON DUPLICATE KEY UPDATE
     staging_table = VALUES(staging_table),
     metadata_columns = VALUES(metadata_columns),
     required_columns = VALUES(required_columns),
     column_mappings = VALUES(column_mappings),
-    options = VALUES(options);
+    options = VALUES(options),
+    time_range_column = VALUES(time_range_column),
+    time_range_format = VALUES(time_range_format),
+    overlap_target_table = VALUES(overlap_target_table);
 
 -- TODO (pending workbook upload):
 -- Add a new VALUES block for the latest Excel template once the file is available in ./uploads.

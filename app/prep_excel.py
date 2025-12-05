@@ -220,6 +220,16 @@ def _loads_json(value):
     return value
 
 
+def _clean_optional_text(value: object) -> str | None:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _normalise_db_settings(db_settings: Mapping[str, object] | None) -> dict[str, object]:
     if db_settings is None:
         return dict(DB)
@@ -252,6 +262,9 @@ def _parse_sheet_config_rows(
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
         column_mappings = _loads_json(row.get("column_mappings"))
+        time_range_column = _clean_optional_text(row.get("time_range_column"))
+        time_range_format = _clean_optional_text(row.get("time_range_format"))
+        overlap_target_table = _clean_optional_text(row.get("overlap_target_table"))
         normalized_table_source = "none"
         normalized_table = row.get("normalized_table")
         if isinstance(normalized_table, str):
@@ -326,6 +339,15 @@ def _parse_sheet_config_rows(
                     cleaned_overrides[key_text] = type_text
                 if cleaned_overrides:
                     normalized_column_type_overrides = cleaned_overrides
+            time_range_column = time_range_column or _clean_optional_text(
+                options.get("time_range_column")
+            )
+            time_range_format = time_range_format or _clean_optional_text(
+                options.get("time_range_format")
+            )
+            overlap_target_table = overlap_target_table or _clean_optional_text(
+                options.get("overlap_target_table")
+            )
         if normalized_table is None:
             staging_table = row.get("staging_table")
             if isinstance(staging_table, str):
@@ -358,6 +380,9 @@ def _parse_sheet_config_rows(
             "normalized_metadata_columns": normalized_metadata_columns,
             "reserved_source_columns": reserved_source_columns,
             "normalized_column_type_overrides": normalized_column_type_overrides,
+            "time_range_column": time_range_column,
+            "time_range_format": time_range_format,
+            "overlap_target_table": overlap_target_table,
         }
         normalized_sources[key] = normalized_table_source
     return config
@@ -374,7 +399,10 @@ def _load_sheet_config(connection) -> dict[str, dict[str, dict[str, object]]]:
                        metadata_columns,
                        required_columns,
                        column_mappings,
-                       options
+                       options,
+                       time_range_column,
+                       time_range_format,
+                       overlap_target_table
                   FROM {CONFIG_TABLE}
                 """
             )
@@ -395,6 +423,9 @@ def _load_sheet_config(connection) -> dict[str, dict[str, dict[str, object]]]:
             rows = cur.fetchall()
             for row in rows:
                 row.setdefault("column_mappings", None)
+                row.setdefault("time_range_column", None)
+                row.setdefault("time_range_format", None)
+                row.setdefault("overlap_target_table", None)
                 row["workbook_type"] = "default"
         else:
             rows = cur.fetchall()

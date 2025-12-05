@@ -37,6 +37,9 @@ class TableConfig:
     staging_table: str
     normalized_table: str
     column_mappings: Mapping[str, str]
+    time_range_column: str | None = None
+    time_range_format: str | None = None
+    overlap_target_table: str | None = None
 
 
 @dataclass(frozen=True)
