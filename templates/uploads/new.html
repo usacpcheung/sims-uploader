@@ -375,6 +375,9 @@
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         resetFeedback();
+        if (conflictResolutionField) {
+          conflictResolutionField.value = 'append';
+        }
         hideOverlapPanel();
 
         setSubmitting(true);
