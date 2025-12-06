@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import re
+import time
 from datetime import date, datetime
 from typing import Any, Iterable, Mapping
 
@@ -217,6 +218,9 @@ def enqueue_job(
     max_rows: int | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
     conflict_resolution: str = "append",
+    normalized_table: str | None = None,
+    overlap_target_table: str | None = None,
+    time_range_column: str | None = None,
 ) -> tuple[str, Any]:
     """Create a job record and enqueue work on the Redis queue."""
 
@@ -244,6 +248,13 @@ def enqueue_job(
         job_store.mark_error(job.job_id, message=str(exc), db_settings=db_settings)
         raise
 
+    if normalized_table:
+        job_store.record_results(
+            job.job_id,
+            normalized_table_name=normalized_table,
+            db_settings=db_settings,
+        )
+
     payload = {
         "workbook_path": workbook_path,
         "sheet": sheet,
@@ -253,6 +264,9 @@ def enqueue_job(
         "db_settings": db_settings,
         "time_ranges": time_ranges,
         "conflict_resolution": conflict_resolution,
+        "normalized_table": normalized_table,
+        "overlap_target_table": overlap_target_table or normalized_table,
+        "time_range_column": time_range_column,
     }
 
     rq_job = queue.enqueue(process_job, job.job_id, payload, job_id=job.job_id)
@@ -292,10 +306,85 @@ def _record_job_results(
         )
 
 
+def _acquire_table_lock(normalized_table: str | None):
+    if not normalized_table or Redis is None:
+        return None
+
+    redis_url = os.getenv(REDIS_URL_ENV)
+    if not redis_url:
+        return None
+
+    try:
+        client = Redis.from_url(redis_url)
+        lock = client.lock(
+            f"upload_table_lock:{normalized_table}",
+            timeout=900,
+            blocking_timeout=300,
+        )
+        if lock.acquire(blocking=True):
+            return lock
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        LOGGER.warning("Unable to acquire Redis lock for %s: %s", normalized_table, exc)
+
+    return None
+
+
+def _has_blocking_jobs(
+    normalized_table: str,
+    *,
+    current_job: job_store.UploadJob,
+    db_settings: Mapping[str, Any] | None,
+) -> bool:
+    connection = job_store._connect(db_settings)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                (
+                    "SELECT 1 FROM `upload_jobs` uj "
+                    "JOIN `upload_job_results` ujr ON uj.job_id = ujr.job_id "
+                    "WHERE ujr.normalized_table_name = %s AND uj.job_id <> %s "
+                    "AND uj.created_at <= %s AND uj.status NOT IN ('Loaded', 'Errors') "
+                    "LIMIT 1"
+                ),
+                (normalized_table, current_job.job_id, current_job.created_at),
+            )
+            return cursor.fetchone() is not None
+    finally:
+        connection.close()
+
+
+def _wait_for_prior_table_jobs(
+    normalized_table: str | None,
+    *,
+    current_job: job_store.UploadJob,
+    db_settings: Mapping[str, Any] | None,
+    poll_interval: float = 1.0,
+    max_wait_seconds: int = 300,
+) -> None:
+    if not normalized_table:
+        return
+
+    deadline = time.monotonic() + max_wait_seconds
+    while _has_blocking_jobs(
+        normalized_table, current_job=current_job, db_settings=db_settings
+    ):
+        if time.monotonic() >= deadline:
+            LOGGER.warning(
+                "Timed out waiting for prior jobs on %s to finish", normalized_table
+            )
+            return
+        time.sleep(poll_interval)
+
+
 def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineResult:
     """Worker entry point executed by RQ."""
 
     db_settings = payload.get("db_settings")
+    normalized_table = payload.get("normalized_table")
+    time_range_column = payload.get("time_range_column")
+    overlap_target_table = payload.get("overlap_target_table") or normalized_table
+    derived_time_ranges = payload.get("time_ranges")
+    conflict_resolution = payload.get("conflict_resolution", "append")
 
     def _notify(status: str, message: str | None) -> None:
         if status == "Parsing":
@@ -304,6 +393,23 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             job_store.mark_validating(job_id, message=message, db_settings=db_settings)
         else:  # pragma: no cover - defensive logging for future states
             LOGGER.info("Unhandled status notification %s for job %s", status, job_id)
+
+    current_job = job_store.get_job(job_id, db_settings=db_settings)
+    table_lock = _acquire_table_lock(normalized_table)
+    if table_lock is None:
+        _wait_for_prior_table_jobs(
+            normalized_table,
+            current_job=current_job,
+            db_settings=db_settings,
+        )
+
+    preflight_overlaps = check_time_overlap(
+        workbook_type=payload.get("workbook_type", "default"),
+        target_table=overlap_target_table,
+        time_range_column=time_range_column,
+        time_ranges=derived_time_ranges,
+        db_settings=db_settings,
+    )
 
     try:
         result = pipeline.run_pipeline(
@@ -315,8 +421,9 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             db_settings=db_settings,
             job_id=job_id,
             status_notifier=_notify,
-            time_ranges=payload.get("time_ranges"),
-            conflict_resolution=payload.get("conflict_resolution", "append"),
+            time_ranges=derived_time_ranges,
+            conflict_resolution=conflict_resolution,
+            preflight_overlaps=preflight_overlaps,
         )
     except pipeline.PipelineExecutionError as exc:
         if exc.result is not None:
@@ -336,6 +443,12 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             db_settings=db_settings,
         )
         raise
+    finally:
+        if table_lock is not None:
+            try:
+                table_lock.release()
+            except Exception:  # pragma: no cover - defensive cleanup
+                LOGGER.warning("Failed to release Redis lock for %s", normalized_table)
 
     _record_job_results(job_id, result, db_settings=db_settings)
 
