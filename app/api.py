@@ -240,6 +240,9 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         max_rows=payload.max_rows,
         time_ranges=effective_time_ranges,
         conflict_resolution=payload.conflict_resolution,
+        normalized_table=table_config.get("normalized_table"),
+        overlap_target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
     )
     job = job_store.get_job(job_id)
     return EnqueueUploadResponse(job=job)

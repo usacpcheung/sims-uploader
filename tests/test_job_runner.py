@@ -62,6 +62,39 @@ def test_enqueue_job_enqueues_when_within_limits(monkeypatch):
     assert captured_kwargs["original_filename"] == "workbook.xlsx"
 
 
+def test_enqueue_job_records_normalized_table(monkeypatch):
+    queue = QueueStub()
+    monkeypatch.setattr(job_runner, "get_queue", lambda: queue)
+
+    created_job = SimpleNamespace(job_id="job-nt")
+    monkeypatch.setattr(job_runner.job_store, "create_job", lambda **kwargs: created_job)
+    monkeypatch.setattr(job_runner.job_store, "mark_error", lambda *args, **kwargs: None)
+
+    recorded_tables: list[tuple[str, str | None]] = []
+
+    def fake_record_results(job_id, normalized_table_name=None, **_):
+        recorded_tables.append((job_id, normalized_table_name))
+
+    monkeypatch.setattr(job_runner.job_store, "record_results", fake_record_results)
+
+    job_runner.enqueue_job(
+        workbook_path="/tmp/workbook.xlsx",
+        sheet="SheetA",
+        source_year="2024",
+        queue=queue,
+        normalized_table="normalized_table",
+        overlap_target_table="target_table",
+        time_range_column="period",
+        time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 2)}],
+    )
+
+    assert recorded_tables == [("job-nt", "normalized_table")]
+    payload = queue.enqueued[0].args[1]
+    assert payload["normalized_table"] == "normalized_table"
+    assert payload["overlap_target_table"] == "target_table"
+    assert payload["time_range_column"] == "period"
+
+
 def test_enqueue_job_marks_error_when_limit_exceeded(monkeypatch):
     queue = QueueStub()
     monkeypatch.setattr(job_runner, "get_queue", lambda: queue)
@@ -118,6 +151,15 @@ def test_enqueue_job_extracts_original_from_stored_path(monkeypatch):
 
 def _setup_job_store_spies(monkeypatch):
     calls = {"parsing": [], "validating": [], "record_results": [], "mark_loaded": [], "mark_error": [], "save_rejected": []}
+
+    monkeypatch.setattr(
+        job_runner.job_store,
+        "get_job",
+        lambda job_id, db_settings=None: SimpleNamespace(
+            job_id=job_id,
+            created_at=datetime(2024, 1, 1),
+        ),
+    )
 
     monkeypatch.setattr(
         job_runner.job_store,

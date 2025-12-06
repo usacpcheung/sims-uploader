@@ -168,6 +168,7 @@ def run_pipeline(
     status_notifier: Callable[[str, str | None], None] | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
     conflict_resolution: str = "append",
+    preflight_overlaps: list[Mapping[str, object]] | None = None,
 ) -> PipelineResult:
     conflict_resolution = conflict_resolution or "append"
     allowed_resolutions = {"append", "replace", "skip"}
@@ -294,13 +295,15 @@ def run_pipeline(
             rejected_rows_path = validation_result.rejected_rows_path
 
             effective_time_ranges = time_ranges or derived_time_ranges or None
-            overlaps = job_runner.check_time_overlap(
-                workbook_type=workbook_type,
-                target_table=overlap_target_table,
-                time_range_column=time_range_column,
-                time_ranges=effective_time_ranges,
-                db_settings=db_settings,
-            )
+            overlaps = preflight_overlaps
+            if overlaps is None:
+                overlaps = job_runner.check_time_overlap(
+                    workbook_type=workbook_type,
+                    target_table=overlap_target_table,
+                    time_range_column=time_range_column,
+                    time_ranges=effective_time_ranges,
+                    db_settings=db_settings,
+                )
 
             connection.begin()
             if overlaps and conflict_resolution == "skip":
@@ -521,6 +524,9 @@ def cli(argv: Iterable[str] | None = None) -> str:
             file_size=file_size,
             time_ranges=effective_time_ranges,
             conflict_resolution=args.conflict_resolution,
+            normalized_table=table_config.get("normalized_table"),
+            overlap_target_table=table_config.get("overlap_target_table"),
+            time_range_column=table_config.get("time_range_column"),
         )
     except job_runner.UploadLimitExceeded as exc:
         print(f"Upload rejected: {exc}", file=sys.stderr)
