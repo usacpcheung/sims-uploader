@@ -101,6 +101,7 @@ class EnqueueUploadRequest(BaseModel):
     max_file_size: int | None = None
     max_rows: int | None = None
     time_ranges: list[ParsedTimeRange] | None = None
+    conflict_resolution: str = "append"
 
 
 class OverlapDetail(BaseModel):
@@ -190,7 +191,7 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         if payload.time_ranges
         else None,
     )
-    if overlaps:
+    if overlaps and payload.conflict_resolution == "append":
         return JSONResponse(
             status_code=HTTPStatus.CONFLICT,
             content=EnqueueUploadResponse(overlaps=overlaps).model_dump(
@@ -210,6 +211,10 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         row_count=payload.row_count,
         max_file_size=payload.max_file_size,
         max_rows=payload.max_rows,
+        time_ranges=[range_.model_dump() for range_ in payload.time_ranges]
+        if payload.time_ranges
+        else None,
+        conflict_resolution=payload.conflict_resolution,
     )
     job = job_store.get_job(job_id)
     return EnqueueUploadResponse(job=job)
