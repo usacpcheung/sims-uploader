@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from app import job_runner, job_store, prep_excel
+from app import job_runner, job_store, prep_excel, time_ranges as time_range_utils
 from app.config import get_upload_storage_dir
 from app.storage import generate_stored_path, get_original_filename, validate_extension
 from app.web import router as web_router
@@ -191,13 +191,27 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
     table_config = prep_excel._get_table_config(
         payload.sheet, workbook_type=payload.workbook_type
     )
+    options = table_config.get("options") or {}
+    derived_time_ranges = time_range_utils.derive_ranges_from_workbook(
+        payload.workbook_path,
+        sheet=payload.sheet,
+        workbook_type=payload.workbook_type,
+        time_range_column=table_config.get("time_range_column"),
+        time_range_format=table_config.get("time_range_format"),
+        rename_last_subject=bool(options.get("rename_last_subject")),
+    )
+    payload_time_ranges = (
+        [range_.model_dump() for range_ in payload.time_ranges]
+        if payload.time_ranges
+        else []
+    )
+    effective_time_ranges = payload_time_ranges or derived_time_ranges or None
+
     overlaps = job_runner.check_time_overlap(
         workbook_type=payload.workbook_type,
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
-        time_ranges=[range_.model_dump() for range_ in payload.time_ranges]
-        if payload.time_ranges
-        else None,
+        time_ranges=effective_time_ranges,
     )
     if overlaps and payload.conflict_resolution == "append":
         primary_overlap = overlaps[0]
@@ -224,9 +238,7 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         row_count=payload.row_count,
         max_file_size=payload.max_file_size,
         max_rows=payload.max_rows,
-        time_ranges=[range_.model_dump() for range_ in payload.time_ranges]
-        if payload.time_ranges
-        else None,
+        time_ranges=effective_time_ranges,
         conflict_resolution=payload.conflict_resolution,
     )
     job = job_store.get_job(job_id)
