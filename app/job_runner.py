@@ -62,6 +62,41 @@ def _coerce_datetime(value: object, *, label: str) -> datetime:
         raise ValueError(f"Invalid {label} value: {value!r}") from exc
 
 
+def _is_missing_table_error(exc: BaseException) -> bool:
+    """Return True when a ProgrammingError represents a missing table."""
+
+    if not isinstance(exc, pymysql.err.ProgrammingError):
+        return False
+
+    code = exc.args[0] if exc.args else None
+    if code == 1146:  # MySQL ER_NO_SUCH_TABLE
+        return True
+    message = str(exc).lower()
+    return "doesn't exist" in message or "does not exist" in message
+
+
+def _table_exists(cursor: pymysql.cursors.Cursor, *, database: str | None, table: str) -> bool:
+    """Return True when ``table`` exists within ``database``.
+
+    When ``database`` is not provided, the check is skipped and True is
+    returned to avoid false negatives in misconfigured test environments.
+    """
+
+    if not database:
+        return True
+
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = %s AND table_name = %s
+        LIMIT 1
+        """,
+        (database, table),
+    )
+    return cursor.fetchone() is not None
+
+
 def check_time_overlap(
     *,
     workbook_type: str,
@@ -108,15 +143,47 @@ def check_time_overlap(
 
     try:
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
-            for start, end in cleaned_ranges:
-                cursor.execute(
-                    (
-                        f"SELECT id, `{start_column}` AS range_start, `{end_column}` AS range_end "
-                        f"FROM `{validated_table}` "
-                        f"WHERE `{start_column}` <= %s AND `{end_column}` >= %s"
-                    ),
-                    (end, start),
+            try:
+                table_exists = _table_exists(
+                    cursor, database=settings.get("database"), table=validated_table
                 )
+            except pymysql.err.ProgrammingError as exc:
+                if _is_missing_table_error(exc):
+                    LOGGER.info(
+                        "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
+                        workbook_type,
+                        validated_table,
+                    )
+                    return []
+                raise
+
+            if not table_exists:
+                LOGGER.info(
+                    "Skipping overlap check for %s: target table %s does not exist",  # noqa: TRY400
+                    workbook_type,
+                    validated_table,
+                )
+                return []
+
+            for start, end in cleaned_ranges:
+                try:
+                    cursor.execute(
+                        (
+                            f"SELECT id, `{start_column}` AS range_start, `{end_column}` AS range_end "
+                            f"FROM `{validated_table}` "
+                            f"WHERE `{start_column}` <= %s AND `{end_column}` >= %s"
+                        ),
+                        (end, start),
+                    )
+                except pymysql.err.ProgrammingError as exc:
+                    if _is_missing_table_error(exc):
+                        LOGGER.info(
+                            "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
+                            workbook_type,
+                            validated_table,
+                        )
+                        return []
+                    raise
                 for row in cursor.fetchall():
                     overlaps.append(
                         {

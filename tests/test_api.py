@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
+from http import HTTPStatus
+from types import SimpleNamespace
 
 os.environ.setdefault("DB_HOST", "localhost")
 os.environ.setdefault("DB_USER", "user")
@@ -19,6 +21,7 @@ from pathlib import Path
 
 from app import api, config, job_runner, job_store
 from app import storage
+from tests import test_job_runner
 
 
 def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
@@ -292,6 +295,54 @@ def test_create_upload_returns_overlap(monkeypatch):
     assert payload["job"] is None
     assert payload["overlap_detected"]["overlaps"][0]["target_table"] == "calendar_table"
     assert "overlap" in payload["overlap_detected"].get("summary", "").lower()
+
+
+def test_create_upload_accepts_missing_overlap_table(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    connection = test_job_runner._FakeConnection([], executed, table_exists=False)
+
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "missing_table",
+            "time_range_column": "period",
+        },
+    )
+    monkeypatch.setattr(
+        api.time_range_utils,
+        "derive_ranges_from_workbook",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_enqueue_job(**kwargs):
+        return "job-123", SimpleNamespace(id="rq-job-123")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", fake_enqueue_job)
+    job = _make_job("job-123")
+    monkeypatch.setattr(job_store, "get_job", lambda job_id: job)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": "uploads/example.xlsx",
+            "sheet": "SHEET",
+            "source_year": "2024",
+            "time_ranges": [
+                {"start": "2024-01-01T00:00:00Z", "end": "2024-01-31T00:00:00Z"}
+            ],
+        },
+    )
+
+    assert response.status_code == HTTPStatus.ACCEPTED
+    payload = response.json()
+    assert payload["job"]["job_id"] == "job-123"
+    assert payload["overlaps"] in (None, [])
 
 
 def test_get_upload_detail_with_results(monkeypatch):

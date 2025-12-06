@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 import os
 from datetime import datetime
 from types import SimpleNamespace
@@ -291,9 +292,12 @@ def test_process_job_hard_failure(monkeypatch):
 
 
 class _FakeCursor:
-    def __init__(self, rows, executed):
+    def __init__(self, rows, executed, *, table_exists=True, programming_error=None):
         self.rows = rows
         self.executed = executed
+        self.table_exists = table_exists
+        self.programming_error = programming_error
+        self._fetchone_result = None
 
     def __enter__(self):
         return self
@@ -302,20 +306,36 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params):
+        if self.programming_error:
+            raise self.programming_error
         self.executed.append((query, params))
+        if "information_schema.tables" in query:
+            self._fetchone_result = (1,) if self.table_exists else None
+        else:
+            self._fetchone_result = None
 
     def fetchall(self):
         return list(self.rows)
 
+    def fetchone(self):
+        return self._fetchone_result
+
 
 class _FakeConnection:
-    def __init__(self, rows, executed):
+    def __init__(self, rows, executed, *, table_exists=True, programming_error=None):
         self.rows = rows
         self.executed = executed
         self.closed = False
+        self.table_exists = table_exists
+        self.programming_error = programming_error
 
     def cursor(self, cursor_class=None):
-        return _FakeCursor(self.rows, self.executed)
+        return _FakeCursor(
+            self.rows,
+            self.executed,
+            table_exists=self.table_exists,
+            programming_error=self.programming_error,
+        )
 
     def close(self):
         self.closed = True
@@ -333,7 +353,9 @@ def test_check_time_overlap_returns_matches(monkeypatch):
 
     connection = _FakeConnection(rows, executed)
     monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
-    monkeypatch.setattr(job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
 
     overlaps = job_runner.check_time_overlap(
         workbook_type="demo",
@@ -352,7 +374,9 @@ def test_check_time_overlap_allows_unicode_identifier(monkeypatch):
     executed: list[tuple[str, tuple[object, ...]]] = []
     connection = _FakeConnection([], executed)
     monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
-    monkeypatch.setattr(job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
 
     overlaps = job_runner.check_time_overlap(
         workbook_type="demo",
@@ -374,3 +398,24 @@ def test_check_time_overlap_rejects_unsafe_identifier():
             time_range_column="period",
             time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 10)}],
         )
+
+
+def test_check_time_overlap_handles_missing_table(monkeypatch, caplog):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    connection = _FakeConnection([], executed, table_exists=False)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+
+    with caplog.at_level(logging.INFO):
+        overlaps = job_runner.check_time_overlap(
+            workbook_type="demo",
+            target_table="calendar",
+            time_range_column="period",
+            time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 10)}],
+        )
+
+    assert connection.closed
+    assert overlaps == []
+    assert any("overlap check" in message.lower() for message in caplog.messages)
