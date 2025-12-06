@@ -164,6 +164,7 @@ def run_pipeline(
     job_id: str | None = None,
     status_notifier: Callable[[str, str | None], None] | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
+    time_range_format: str | None = None,
     conflict_resolution: str = "append",
     preflight_overlaps: list[Mapping[str, object]] | None = None,
 ) -> PipelineResult:
@@ -243,7 +244,7 @@ def run_pipeline(
         staging_table = table_config["table"]
         normalized_table = table_config.get("normalized_table")
         time_range_column = table_config.get("time_range_column")
-        time_range_format = table_config.get("time_range_format")
+        time_range_format = time_range_format or table_config.get("time_range_format")
         overlap_target_table = table_config.get("overlap_target_table")
         if not normalized_table:
             raise ValueError(
@@ -299,6 +300,7 @@ def run_pipeline(
                     target_table=overlap_target_table,
                     time_range_column=time_range_column,
                     time_ranges=effective_time_ranges,
+                    time_range_format=time_range_format,
                     db_settings=db_settings,
                 )
 
@@ -499,6 +501,7 @@ def cli(argv: Iterable[str] | None = None) -> str:
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
     )
     if overlaps and args.conflict_resolution == "append":
         print("Upload overlaps existing records:", file=sys.stderr)

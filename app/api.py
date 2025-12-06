@@ -212,6 +212,7 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
     )
     if overlaps and payload.conflict_resolution == "append":
         primary_overlap = overlaps[0]
@@ -239,6 +240,7 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         max_file_size=payload.max_file_size,
         max_rows=payload.max_rows,
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
         conflict_resolution=payload.conflict_resolution,
         normalized_table=table_config.get("normalized_table"),
         overlap_target_table=table_config.get("overlap_target_table"),
