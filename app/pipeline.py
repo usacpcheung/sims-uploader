@@ -142,15 +142,12 @@ def _delete_overlapping_rows(
     validated_column = job_runner._validate_identifier(  # noqa: SLF001 - internal reuse
         time_range_column, label="time range column"
     )
-    start_column = f"`{validated_column}_start`"
-    end_column = f"`{validated_column}_end`"
-
     with connection.cursor() as cursor:
         for start, end in intervals:
             cursor.execute(
                 (
                     f"DELETE FROM `{normalized_table}` "
-                    f"WHERE {start_column} <= %s AND {end_column} >= %s"
+                    f"WHERE `{validated_column}` <= %s AND `{validated_column}` >= %s"
                 ),
                 (end, start),
             )

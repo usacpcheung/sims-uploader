@@ -15,6 +15,7 @@ os.environ.setdefault("DB_CHARSET", "utf8mb4")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from fastapi.testclient import TestClient
+import pymysql
 import pytest
 
 from pathlib import Path
@@ -343,6 +344,53 @@ def test_create_upload_accepts_missing_overlap_table(monkeypatch):
     payload = response.json()
     assert payload["job"]["job_id"] == "job-123"
     assert payload["overlaps"] in (None, [])
+
+
+def test_create_upload_handles_base_column_overlap(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    programming_error = pymysql.err.ProgrammingError(1054, "Unknown column '日期_start'")
+    connection = test_job_runner._FakeConnection(
+        [], executed, programming_error=programming_error, min_max={}
+    )
+
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar",
+            "time_range_column": "日期",
+        },
+    )
+    monkeypatch.setattr(
+        api.time_range_utils,
+        "derive_ranges_from_workbook",
+        lambda *args, **kwargs: [{"start": "2024-01-01", "end": "2024-01-31"}],
+    )
+
+    def fake_enqueue_job(**kwargs):
+        return "job-456", SimpleNamespace(id="rq-job-456")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", fake_enqueue_job)
+    job = _make_job("job-456")
+    monkeypatch.setattr(job_store, "get_job", lambda job_id: job)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": "uploads/example.xlsx",
+            "sheet": "SHEET",
+            "source_year": "2024",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["job"]["job_id"] == "job-456"
 
 
 def test_get_upload_detail_with_results(monkeypatch):

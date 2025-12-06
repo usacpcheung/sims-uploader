@@ -114,8 +114,8 @@ def check_time_overlap(
     target_table:
         Table containing existing time ranges to compare against.
     time_range_column:
-        Base column name representing the stored range (expects ``<name>_start``
-        and ``<name>_end`` columns).
+        Column name representing the stored time values used to derive existing
+        ranges.
     time_ranges:
         Iterable of mappings with ``start`` and ``end`` keys parsed from the
         workbook content.
@@ -128,9 +128,6 @@ def check_time_overlap(
 
     validated_table = _validate_identifier(target_table, label="overlap target table")
     validated_column = _validate_identifier(time_range_column, label="time range column")
-    start_column = f"{validated_column}_start"
-    end_column = f"{validated_column}_end"
-
     cleaned_ranges: list[tuple[datetime, datetime]] = []
     for idx, range_value in enumerate(time_ranges):
         start = _coerce_datetime(range_value.get("start"), label=f"time range {idx + 1} start")
@@ -165,26 +162,54 @@ def check_time_overlap(
                 )
                 return []
 
-            for start, end in cleaned_ranges:
-                try:
-                    cursor.execute(
-                        (
-                            f"SELECT id, `{start_column}` AS range_start, `{end_column}` AS range_end "
-                            f"FROM `{validated_table}` "
-                            f"WHERE `{start_column}` <= %s AND `{end_column}` >= %s"
-                        ),
-                        (end, start),
+            try:
+                cursor.execute(
+                    (
+                        f"SELECT MIN(`{validated_column}`) AS range_start, "
+                        f"MAX(`{validated_column}`) AS range_end "
+                        f"FROM `{validated_table}`"
                     )
-                except pymysql.err.ProgrammingError as exc:
-                    if _is_missing_table_error(exc):
-                        LOGGER.info(
-                            "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
-                            workbook_type,
-                            validated_table,
-                        )
-                        return []
-                    raise
-                for row in cursor.fetchall():
+                )
+            except pymysql.err.ProgrammingError as exc:
+                if _is_missing_table_error(exc):
+                    LOGGER.info(
+                        "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
+                        workbook_type,
+                        validated_table,
+                    )
+                    return []
+                LOGGER.info(
+                    "Skipping overlap check for %s: unable to query %s.%s (%s)",
+                    workbook_type,
+                    validated_table,
+                    validated_column,
+                    exc,
+                )
+                return []
+
+            range_row = cursor.fetchone() or {}
+            existing_start = range_row.get("range_start")
+            existing_end = range_row.get("range_end")
+
+            if existing_start is None or existing_end is None:
+                LOGGER.info(
+                    "Skipping overlap check for %s: no existing values for %s in %s",  # noqa: TRY400
+                    workbook_type,
+                    validated_column,
+                    validated_table,
+                )
+                return []
+
+            LOGGER.info(
+                "Derived existing %s range for %s: %s – %s",
+                validated_column,
+                validated_table,
+                existing_start,
+                existing_end,
+            )
+
+            for start, end in cleaned_ranges:
+                if existing_start <= end and existing_end >= start:
                     overlaps.append(
                         {
                             "workbook_type": workbook_type,
@@ -192,9 +217,9 @@ def check_time_overlap(
                             "time_range_column": validated_column,
                             "requested_start": start,
                             "requested_end": end,
-                            "existing_start": row.get("range_start"),
-                            "existing_end": row.get("range_end"),
-                            "record_id": row.get("id"),
+                            "existing_start": existing_start,
+                            "existing_end": existing_end,
+                            "record_id": None,
                         }
                     )
     finally:
