@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pymysql
 import pytest
 
-from app import ingest_excel, pipeline
+from app import ingest_excel, job_runner, pipeline
 
 
 class _Cursor:
@@ -817,6 +817,16 @@ def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
 
     captured_args = {}
 
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": None,
+            "time_range_column": None,
+        },
+    )
+    monkeypatch.setattr(job_runner, "check_time_overlap", lambda **kwargs: [])
+
     def fake_enqueue_job(**kwargs):
         captured_args.update(kwargs)
         return "job-123", object()
@@ -845,4 +855,50 @@ def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
         "batch_id": "batch-9",
         "file_size": workbook.stat().st_size,
     }
+
+
+def test_cli_aborts_on_overlap(monkeypatch, capsys, tmp_path):
+    workbook = tmp_path / "workbook.xlsx"
+    workbook.write_bytes(b"data")
+
+    monkeypatch.setattr(
+        pipeline.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar",
+            "time_range_column": "period",
+        },
+    )
+
+    overlaps = [
+        {
+            "target_table": "calendar",
+            "time_range_column": "period",
+            "requested_start": dt.datetime(2024, 2, 1),
+            "requested_end": dt.datetime(2024, 2, 28),
+            "existing_start": dt.datetime(2024, 2, 10),
+            "existing_end": dt.datetime(2024, 2, 12),
+            "record_id": 11,
+        }
+    ]
+
+    monkeypatch.setattr(job_runner, "check_time_overlap", lambda **kwargs: overlaps)
+    monkeypatch.setattr(job_runner, "enqueue_job", lambda **kwargs: (_ for _ in ()).throw(Exception("should not enqueue")))
+
+    with pytest.raises(SystemExit):
+        pipeline.cli(
+            [
+                str(workbook),
+                "SheetA",
+                "--source-year",
+                "2024",
+                "--time-range",
+                "2024-02-01",
+                "2024-02-28",
+            ]
+        )
+
+    out = capsys.readouterr()
+    assert "overlaps existing records" in out.err
+    assert "calendar" in out.err
 
