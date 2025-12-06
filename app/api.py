@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from app import job_runner, job_store
+from app import job_runner, job_store, prep_excel
 from app.config import get_upload_storage_dir
 from app.storage import generate_stored_path, get_original_filename, validate_extension
 from app.web import router as web_router
@@ -81,6 +81,11 @@ class UploadJobDetailModel(BaseModel):
     result: UploadJobResultModel | None = None
 
 
+class ParsedTimeRange(BaseModel):
+    start: datetime
+    end: datetime
+
+
 class EnqueueUploadRequest(BaseModel):
     """Request body for ``POST /uploads``."""
 
@@ -95,12 +100,24 @@ class EnqueueUploadRequest(BaseModel):
     row_count: int | None = None
     max_file_size: int | None = None
     max_rows: int | None = None
+    time_ranges: list[ParsedTimeRange] | None = None
+
+
+class OverlapDetail(BaseModel):
+    target_table: str
+    time_range_column: str
+    requested_start: datetime
+    requested_end: datetime
+    existing_start: datetime | None = None
+    existing_end: datetime | None = None
+    record_id: int | None = None
 
 
 class EnqueueUploadResponse(BaseModel):
     """Response body after enqueueing an upload job."""
 
-    job: UploadJobModel
+    job: UploadJobModel | None = None
+    overlaps: list[OverlapDetail] | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -161,6 +178,25 @@ if PipelineExecutionError is not None:  # pragma: no cover - registration happen
 @app.post("/uploads", response_model=EnqueueUploadResponse, status_code=HTTPStatus.ACCEPTED)
 def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
     """Create a new upload job and enqueue it for background processing."""
+
+    table_config = prep_excel._get_table_config(
+        payload.sheet, workbook_type=payload.workbook_type
+    )
+    overlaps = job_runner.check_time_overlap(
+        workbook_type=payload.workbook_type,
+        target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
+        time_ranges=[range_.model_dump() for range_ in payload.time_ranges]
+        if payload.time_ranges
+        else None,
+    )
+    if overlaps:
+        return JSONResponse(
+            status_code=HTTPStatus.CONFLICT,
+            content=EnqueueUploadResponse(overlaps=overlaps).model_dump(
+                mode="json"
+            ),
+        )
 
     job_id, _ = job_runner.enqueue_job(
         workbook_path=payload.workbook_path,

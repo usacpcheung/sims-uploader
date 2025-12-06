@@ -93,6 +93,18 @@ def staged_upload(upload_storage_dir):
     return data, stored_path, content
 
 
+@pytest.fixture(autouse=True)
+def stub_table_config(monkeypatch):
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": None,
+            "time_range_column": None,
+        },
+    )
+
+
 def test_create_upload_success(monkeypatch, staged_upload):
     staging_payload, stored_path, _ = staged_upload
     job = _make_job()
@@ -218,6 +230,65 @@ def test_create_upload_limit_violation(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "File too large"
+
+
+def test_create_upload_returns_overlap(monkeypatch):
+    overlap_payload = [
+        {
+            "target_table": "calendar_table",
+            "time_range_column": "period",
+            "requested_start": datetime(2024, 1, 1, tzinfo=timezone.utc),
+            "requested_end": datetime(2024, 1, 31, tzinfo=timezone.utc),
+            "existing_start": datetime(2024, 1, 5, tzinfo=timezone.utc),
+            "existing_end": datetime(2024, 1, 20, tzinfo=timezone.utc),
+            "record_id": 99,
+        }
+    ]
+
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar_table",
+            "time_range_column": "period",
+        },
+    )
+    monkeypatch.setattr(
+        job_runner,
+        "check_time_overlap",
+        lambda **kwargs: overlap_payload,
+    )
+
+    enqueue_called = False
+
+    def _fail_enqueue(**kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        raise AssertionError("enqueue_job should not be called when overlaps exist")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", _fail_enqueue)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": "uploads/example.xlsx",
+            "sheet": "SHEET",
+            "source_year": "2024",
+            "time_ranges": [
+                {
+                    "start": "2024-01-01T00:00:00Z",
+                    "end": "2024-01-31T00:00:00Z",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert not enqueue_called
+    payload = response.json()
+    assert payload["job"] is None
+    assert payload["overlaps"][0]["target_table"] == "calendar_table"
 
 
 def test_get_upload_detail_with_results(monkeypatch):

@@ -1,4 +1,5 @@
 import datetime as dt
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -238,3 +239,71 @@ def test_process_job_hard_failure(monkeypatch):
     assert not calls["mark_loaded"]
     assert calls["mark_error"] and "boom" in calls["mark_error"][0][1]
     assert len(calls["record_results"]) == 1
+
+
+class _FakeCursor:
+    def __init__(self, rows, executed):
+        self.rows = rows
+        self.executed = executed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def execute(self, query, params):
+        self.executed.append((query, params))
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class _FakeConnection:
+    def __init__(self, rows, executed):
+        self.rows = rows
+        self.executed = executed
+        self.closed = False
+
+    def cursor(self, cursor_class=None):
+        return _FakeCursor(self.rows, self.executed)
+
+    def close(self):
+        self.closed = True
+
+
+def test_check_time_overlap_returns_matches(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    rows = [
+        {
+            "id": 1,
+            "range_start": datetime(2024, 1, 5),
+            "range_end": datetime(2024, 1, 9),
+        }
+    ]
+
+    connection = _FakeConnection(rows, executed)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+
+    overlaps = job_runner.check_time_overlap(
+        workbook_type="demo",
+        target_table="calendar",
+        time_range_column="period",
+        time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 10)}],
+    )
+
+    assert connection.closed
+    assert executed and "`period_start`" in executed[0][0]
+    assert overlaps and overlaps[0]["record_id"] == 1
+    assert overlaps[0]["existing_end"] == rows[0]["range_end"]
+
+
+def test_check_time_overlap_rejects_unsafe_identifier():
+    with pytest.raises(ValueError):
+        job_runner.check_time_overlap(
+            workbook_type="demo",
+            target_table="calendar;DROP",
+            time_range_column="period",
+            time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 10)}],
+        )

@@ -6,7 +6,9 @@ import argparse
 import logging
 import os
 import signal
-from typing import Any, Mapping
+import re
+from datetime import date, datetime
+from typing import Any, Iterable, Mapping
 
 try:  # pragma: no cover - optional dependency guard
     from redis import Redis
@@ -18,7 +20,9 @@ try:  # pragma: no cover - optional dependency guard
 except ImportError:  # pragma: no cover
     Queue = Worker = None  # type: ignore[assignment]
 
-from app import job_store, pipeline, prep_excel
+import pymysql
+
+from app import ingest_excel, job_store, pipeline, prep_excel
 from app.config import load_environment
 from app.storage import get_original_filename
 
@@ -32,6 +36,103 @@ ROW_LIMIT_ENV = "UPLOAD_MAX_ROWS"
 DEFAULT_QUEUE_NAME = "sims_uploads"
 DEFAULT_FILE_SIZE_LIMIT = 100 * 1024 * 1024  # 100 MB
 DEFAULT_ROW_LIMIT = 500_000
+
+
+def _validate_identifier(identifier: str, *, label: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_]+", identifier):
+        raise ValueError(f"Unsafe {label}: {identifier!r}")
+    return identifier
+
+
+def _coerce_datetime(value: object, *, label: str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    if value is None:
+        raise ValueError(f"Missing {label} value for overlap check")
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"Missing {label} value for overlap check")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {label} value: {value!r}") from exc
+
+
+def check_time_overlap(
+    *,
+    workbook_type: str,
+    target_table: str | None,
+    time_range_column: str | None,
+    time_ranges: Iterable[Mapping[str, object]] | None,
+    db_settings: Mapping[str, Any] | None = None,
+) -> list[dict[str, object]]:
+    """Return conflicts between supplied ranges and stored intervals.
+
+    Parameters
+    ----------
+    workbook_type:
+        Logical workbook identifier used for logging context only.
+    target_table:
+        Table containing existing time ranges to compare against.
+    time_range_column:
+        Base column name representing the stored range (expects ``<name>_start``
+        and ``<name>_end`` columns).
+    time_ranges:
+        Iterable of mappings with ``start`` and ``end`` keys parsed from the
+        workbook content.
+    db_settings:
+        Optional database configuration overrides.
+    """
+
+    if not target_table or not time_range_column or not time_ranges:
+        return []
+
+    validated_table = _validate_identifier(target_table, label="overlap target table")
+    validated_column = _validate_identifier(time_range_column, label="time range column")
+    start_column = f"{validated_column}_start"
+    end_column = f"{validated_column}_end"
+
+    cleaned_ranges: list[tuple[datetime, datetime]] = []
+    for idx, range_value in enumerate(time_ranges):
+        start = _coerce_datetime(range_value.get("start"), label=f"time range {idx + 1} start")
+        end = _coerce_datetime(range_value.get("end"), label=f"time range {idx + 1} end")
+        cleaned_ranges.append((start, end))
+
+    settings = ingest_excel._get_db_settings(db_settings)
+    connection = pymysql.connect(**settings)
+    overlaps: list[dict[str, object]] = []
+
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            for start, end in cleaned_ranges:
+                cursor.execute(
+                    (
+                        f"SELECT id, `{start_column}` AS range_start, `{end_column}` AS range_end "
+                        f"FROM `{validated_table}` "
+                        f"WHERE `{start_column}` <= %s AND `{end_column}` >= %s"
+                    ),
+                    (end, start),
+                )
+                for row in cursor.fetchall():
+                    overlaps.append(
+                        {
+                            "workbook_type": workbook_type,
+                            "target_table": validated_table,
+                            "time_range_column": validated_column,
+                            "requested_start": start,
+                            "requested_end": end,
+                            "existing_start": row.get("range_start"),
+                            "existing_end": row.get("range_end"),
+                            "record_id": row.get("id"),
+                        }
+                    )
+    finally:
+        connection.close()
+
+    return overlaps
 
 
 class UploadLimitExceeded(ValueError):

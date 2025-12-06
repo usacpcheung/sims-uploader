@@ -69,6 +69,16 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default="default",
         help="Workbook type used to select configuration overrides (default: %(default)s)",
     )
+    parser.add_argument(
+        "--time-range",
+        action="append",
+        nargs=2,
+        metavar=("START", "END"),
+        help=(
+            "Optional time range intervals (inclusive) to check for overlaps before "
+            "enqueueing; may be passed multiple times."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -295,6 +305,29 @@ def run_pipeline(
     )
 
 
+def _parse_time_ranges_arg(
+    values: list[list[str]] | None,
+) -> list[dict[str, datetime]]:
+    parsed: list[dict[str, datetime]] = []
+    if not values:
+        return parsed
+
+    for idx, (start, end) in enumerate(values, start=1):
+        try:
+            parsed.append(
+                {
+                    "start": datetime.fromisoformat(start),
+                    "end": datetime.fromisoformat(end),
+                }
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --time-range #{idx}; expected ISO-formatted start and end"
+            ) from exc
+
+    return parsed
+
+
 def cli(argv: Iterable[str] | None = None) -> str:
     from app import job_runner  # Imported lazily to avoid circular dependency
 
@@ -304,6 +337,33 @@ def cli(argv: Iterable[str] | None = None) -> str:
     except OSError as exc:  # pragma: no cover - exercised via CLI integration
         print(f"Unable to stat workbook {args.workbook}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    try:
+        time_ranges = _parse_time_ranges_arg(args.time_range)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    table_config = prep_excel._get_table_config(
+        args.sheet, workbook_type=args.workbook_type
+    )
+
+    overlaps = job_runner.check_time_overlap(
+        workbook_type=args.workbook_type,
+        target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
+        time_ranges=time_ranges,
+    )
+    if overlaps:
+        print("Upload overlaps existing records:", file=sys.stderr)
+        for overlap in overlaps:
+            print(
+                f"- {overlap['target_table']} {overlap['time_range_column']}: "
+                f"{overlap['requested_start']} – {overlap['requested_end']} "
+                f"conflicts with {overlap['existing_start']} – {overlap['existing_end']}",
+                file=sys.stderr,
+            )
+        raise SystemExit(1)
 
     try:
         job_id, _ = job_runner.enqueue_job(
