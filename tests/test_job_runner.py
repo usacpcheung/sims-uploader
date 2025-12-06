@@ -389,6 +389,39 @@ def test_check_time_overlap_returns_matches(monkeypatch):
     assert overlaps[0]["existing_end"] == min_max["range_end"]
 
 
+def test_check_time_overlap_coerces_date_min_max(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    min_max = {
+        "range_start": dt.date(2024, 1, 5),
+        "range_end": dt.date(2024, 1, 9),
+    }
+
+    connection = _FakeConnection([], executed, min_max=min_max)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+
+    overlaps = job_runner.check_time_overlap(
+        workbook_type="demo",
+        target_table="calendar",
+        time_range_column="period",
+        time_ranges=[
+            {"start": datetime(2024, 1, 1), "end": dt.date(2024, 1, 10)},
+            {"start": dt.date(2024, 2, 1), "end": dt.date(2024, 2, 10)},
+        ],
+    )
+
+    assert connection.closed
+    assert executed and any("MIN(`period`)" in sql for sql, _ in executed)
+    assert len(overlaps) == 1
+    overlap = overlaps[0]
+    assert overlap["existing_start"] == datetime(2024, 1, 5)
+    assert overlap["existing_end"] == datetime(2024, 1, 9)
+    assert overlap["requested_start"] == datetime(2024, 1, 1)
+    assert overlap["requested_end"] == datetime(2024, 1, 10)
+
+
 def test_check_time_overlap_allows_unicode_identifier(monkeypatch):
     executed: list[tuple[str, tuple[object, ...]]] = []
     connection = _FakeConnection([], executed, min_max={})

@@ -188,10 +188,10 @@ def check_time_overlap(
                 return []
 
             range_row = cursor.fetchone() or {}
-            existing_start = range_row.get("range_start")
-            existing_end = range_row.get("range_end")
+            existing_start_raw = range_row.get("range_start")
+            existing_end_raw = range_row.get("range_end")
 
-            if existing_start is None or existing_end is None:
+            if existing_start_raw is None or existing_end_raw is None:
                 LOGGER.info(
                     "Skipping overlap check for %s: no existing values for %s in %s",  # noqa: TRY400
                     workbook_type,
@@ -199,6 +199,13 @@ def check_time_overlap(
                     validated_table,
                 )
                 return []
+
+            existing_start = _coerce_datetime(
+                existing_start_raw, label=f"{validated_column} existing start"
+            )
+            existing_end = _coerce_datetime(
+                existing_end_raw, label=f"{validated_column} existing end"
+            )
 
             LOGGER.info(
                 "Derived existing %s range for %s: %s – %s",

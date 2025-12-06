@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from http import HTTPStatus
 from types import SimpleNamespace
 
@@ -296,6 +296,54 @@ def test_create_upload_returns_overlap(monkeypatch):
     assert payload["job"] is None
     assert payload["overlap_detected"]["overlaps"][0]["target_table"] == "calendar_table"
     assert "overlap" in payload["overlap_detected"].get("summary", "").lower()
+
+
+def test_create_upload_returns_overlap_for_date_column(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    min_max = {"range_start": date(2024, 1, 5), "range_end": date(2024, 1, 9)}
+
+    connection = test_job_runner._FakeConnection([], executed, min_max=min_max)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar_table",
+            "time_range_column": "period",
+        },
+    )
+    monkeypatch.setattr(api.time_range_utils, "derive_ranges_from_workbook", lambda *_, **__: None)
+
+    enqueue_called = False
+
+    def _fail_enqueue(**kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        raise AssertionError("enqueue_job should not be called when overlaps exist")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", _fail_enqueue)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": "uploads/example.xlsx",
+            "sheet": "SHEET",
+            "source_year": "2024",
+            "time_ranges": [{"start": "2024-01-01", "end": "2024-01-10"}],
+        },
+    )
+
+    assert response.status_code == 409
+    assert not enqueue_called
+    payload = response.json()
+    overlap = payload["overlap_detected"]["overlaps"][0]
+    assert overlap["target_table"] == "calendar_table"
+    assert overlap["existing_start"].startswith("2024-01-05")
+    assert overlap["existing_end"].startswith("2024-01-09")
 
 
 def test_create_upload_accepts_missing_overlap_table(monkeypatch):
