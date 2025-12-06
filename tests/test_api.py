@@ -399,6 +399,71 @@ def test_create_upload_returns_overlap_for_date_column_with_datetime_input(monke
     assert overlap["existing_end"].startswith("2024-01-09")
 
 
+def test_create_upload_allows_acknowledged_append(monkeypatch):
+    overlaps = [
+        {
+            "target_table": "calendar_table",
+            "time_range_column": "period",
+            "requested_start": datetime(2024, 1, 1, tzinfo=timezone.utc),
+            "requested_end": datetime(2024, 1, 31, tzinfo=timezone.utc),
+            "existing_start": datetime(2024, 1, 5, tzinfo=timezone.utc),
+            "existing_end": datetime(2024, 1, 20, tzinfo=timezone.utc),
+            "record_id": 99,
+        }
+    ]
+    overlap_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar_table",
+            "time_range_column": "period",
+        },
+    )
+
+    def _capture_overlaps(**kwargs):
+        overlap_calls.append(kwargs)
+        return overlaps
+
+    monkeypatch.setattr(job_runner, "check_time_overlap", _capture_overlaps)
+
+    enqueue_called = False
+
+    def _enqueue_job(**kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        return "job-ack", SimpleNamespace(id="rq-job-ack")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", _enqueue_job)
+    job = _make_job("job-ack")
+    monkeypatch.setattr(job_store, "get_job", lambda job_id: job)
+
+    client = TestClient(api.app)
+    payload = {
+        "workbook_path": "uploads/example.xlsx",
+        "sheet": "SHEET",
+        "source_year": "2024",
+        "time_ranges": [
+            {"start": "2024-01-01T00:00:00Z", "end": "2024-01-31T00:00:00Z"}
+        ],
+    }
+
+    first_response = client.post("/uploads", json=payload)
+    assert first_response.status_code == HTTPStatus.CONFLICT
+    assert first_response.json()["overlap_detected"]["overlaps"]
+    assert len(overlap_calls) == 1
+    assert not enqueue_called
+
+    second_response = client.post(
+        "/uploads", json={**payload, "overlap_acknowledged": True}
+    )
+    assert second_response.status_code == HTTPStatus.ACCEPTED
+    assert second_response.json()["job"]["job_id"] == "job-ack"
+    assert enqueue_called
+    assert len(overlap_calls) == 2
+
+
 def test_create_upload_passes_time_range_format(monkeypatch):
     captured_kwargs: dict[str, object] = {}
 
