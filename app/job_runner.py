@@ -39,7 +39,7 @@ DEFAULT_ROW_LIMIT = 500_000
 
 
 def _validate_identifier(identifier: str, *, label: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_]+", identifier):
+    if not re.fullmatch(r"\w+", identifier, flags=re.UNICODE):
         raise ValueError(f"Unsafe {label}: {identifier!r}")
     return identifier
 

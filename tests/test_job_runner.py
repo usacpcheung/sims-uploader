@@ -1,8 +1,15 @@
 import datetime as dt
+import os
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_USER", "user")
+os.environ.setdefault("DB_PASSWORD", "password")
+os.environ.setdefault("DB_NAME", "database")
+os.environ.setdefault("DB_CHARSET", "utf8mb4")
 
 from app import job_runner, pipeline
 
@@ -297,6 +304,24 @@ def test_check_time_overlap_returns_matches(monkeypatch):
     assert executed and "`period_start`" in executed[0][0]
     assert overlaps and overlaps[0]["record_id"] == 1
     assert overlaps[0]["existing_end"] == rows[0]["range_end"]
+
+
+def test_check_time_overlap_allows_unicode_identifier(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    connection = _FakeConnection([], executed)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+
+    overlaps = job_runner.check_time_overlap(
+        workbook_type="demo",
+        target_table="计划表",
+        time_range_column="日期",
+        time_ranges=[{"start": datetime(2024, 1, 1), "end": datetime(2024, 1, 2)}],
+    )
+
+    assert connection.closed
+    assert executed and "`日期_start`" in executed[0][0]
+    assert overlaps == []
 
 
 def test_check_time_overlap_rejects_unsafe_identifier():
