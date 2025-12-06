@@ -12,7 +12,14 @@ from typing import Callable, Iterable, Mapping
 
 import pymysql
 
-from app import ingest_excel, job_runner, normalize_staging, prep_excel, validation
+from app import (
+    ingest_excel,
+    job_runner,
+    normalize_staging,
+    prep_excel,
+    time_ranges as time_range_utils,
+    validation,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -238,6 +245,7 @@ def run_pipeline(
         staging_table = table_config["table"]
         normalized_table = table_config.get("normalized_table")
         time_range_column = table_config.get("time_range_column")
+        time_range_format = table_config.get("time_range_format")
         overlap_target_table = table_config.get("overlap_target_table")
         if not normalized_table:
             raise ValueError(
@@ -255,6 +263,11 @@ def run_pipeline(
         connection = pymysql.connect(**settings)
         try:
             staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
+            derived_time_ranges = time_range_utils.derive_ranges_from_rows(
+                staging_rows,
+                time_range_column=time_range_column,
+                time_range_format=time_range_format,
+            )
             prepared_batch = normalize_staging.prepare_normalization(
                 staging_rows,
                 column_mappings,
@@ -280,11 +293,12 @@ def run_pipeline(
             validation_errors = validation_result.errors
             rejected_rows_path = validation_result.rejected_rows_path
 
+            effective_time_ranges = time_ranges or derived_time_ranges or None
             overlaps = job_runner.check_time_overlap(
                 workbook_type=workbook_type,
                 target_table=overlap_target_table,
                 time_range_column=time_range_column,
-                time_ranges=time_ranges,
+                time_ranges=effective_time_ranges,
                 db_settings=db_settings,
             )
 
@@ -456,23 +470,35 @@ def cli(argv: Iterable[str] | None = None) -> str:
         raise SystemExit(1) from exc
 
     try:
-        time_ranges = _parse_time_ranges_arg(args.time_range)
+        requested_time_ranges = _parse_time_ranges_arg(args.time_range)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
-    if not time_ranges:
-        time_ranges = None
+    if not requested_time_ranges:
+        requested_time_ranges = None
 
     table_config = prep_excel._get_table_config(
         args.sheet, workbook_type=args.workbook_type
+    )
+    options = table_config.get("options") or {}
+    derived_time_ranges = time_range_utils.derive_ranges_from_workbook(
+        args.workbook,
+        sheet=args.sheet,
+        workbook_type=args.workbook_type,
+        time_range_column=table_config.get("time_range_column"),
+        time_range_format=table_config.get("time_range_format"),
+        rename_last_subject=bool(options.get("rename_last_subject")),
+    )
+    effective_time_ranges = (
+        requested_time_ranges or derived_time_ranges or None
     )
 
     overlaps = job_runner.check_time_overlap(
         workbook_type=args.workbook_type,
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
-        time_ranges=time_ranges,
+        time_ranges=effective_time_ranges,
     )
     if overlaps and args.conflict_resolution == "append":
         print("Upload overlaps existing records:", file=sys.stderr)
@@ -493,7 +519,7 @@ def cli(argv: Iterable[str] | None = None) -> str:
             source_year=args.source_year,
             batch_id=args.batch_id,
             file_size=file_size,
-            time_ranges=time_ranges,
+            time_ranges=effective_time_ranges,
             conflict_resolution=args.conflict_resolution,
         )
     except job_runner.UploadLimitExceeded as exc:
