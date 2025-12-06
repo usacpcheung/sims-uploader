@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
@@ -101,7 +101,7 @@ class EnqueueUploadRequest(BaseModel):
     max_file_size: int | None = None
     max_rows: int | None = None
     time_ranges: list[ParsedTimeRange] | None = None
-    conflict_resolution: str = "append"
+    conflict_resolution: Literal["append", "replace", "skip"] = "append"
 
 
 class OverlapDetail(BaseModel):
@@ -114,11 +114,19 @@ class OverlapDetail(BaseModel):
     record_id: int | None = None
 
 
+class OverlapDetected(BaseModel):
+    """Payload returned when overlap preflight checks fail."""
+
+    summary: str | None = None
+    overlaps: list[OverlapDetail]
+
+
 class EnqueueUploadResponse(BaseModel):
     """Response body after enqueueing an upload job."""
 
     job: UploadJobModel | None = None
     overlaps: list[OverlapDetail] | None = None
+    overlap_detected: OverlapDetected | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -192,11 +200,16 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         else None,
     )
     if overlaps and payload.conflict_resolution == "append":
+        primary_overlap = overlaps[0]
+        table = primary_overlap.get("target_table") or "target table"
+        column = primary_overlap.get("time_range_column") or "time range"
+        summary = f"Detected overlapping time ranges in {table} ({column})"
+        overlap_detected = OverlapDetected(summary=summary, overlaps=overlaps)
         return JSONResponse(
             status_code=HTTPStatus.CONFLICT,
-            content=EnqueueUploadResponse(overlaps=overlaps).model_dump(
-                mode="json"
-            ),
+            content=EnqueueUploadResponse(
+                overlaps=overlaps, overlap_detected=overlap_detected
+            ).model_dump(mode="json"),
         )
 
     job_id, _ = job_runner.enqueue_job(

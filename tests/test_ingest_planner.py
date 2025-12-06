@@ -155,6 +155,9 @@ class SqlGenerationTests(unittest.TestCase):
                     "metadata_columns": ingest_planner.METADATA_COLUMNS,
                     "clean_headers": ["日期"],
                     "suggested_staging_columns": ["日期"],
+                    "time_range_column": "日期",
+                    "time_range_format": "%m/%d/%Y",
+                    "overlap_target_table": "book_sheetb_overlaps",
                     "options": {
                         "normalized_table": "book_sheetb",
                         "column_types": {"日期": "DATE NULL"},
@@ -172,15 +175,18 @@ class SqlGenerationTests(unittest.TestCase):
         self.assertIn("JSON_ARRAY('學生編號', '姓名')", sql)
         self.assertIn("JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名')", sql)
         self.assertIn(
-            "JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名'),\n        "
             "JSON_OBJECT('normalized_table', 'book_sheeta', 'column_types', "
-            "JSON_OBJECT('學生編號', 'INTEGER NULL', '姓名', 'VARCHAR(255) NULL')),",
+            "JSON_OBJECT('學生編號', 'INTEGER NULL', '姓名', 'VARCHAR(255) NULL'), "
+            "'time_range_column', '日期', 'time_range_format', '%Y/%m/%d', "
+            "'overlap_target_table', 'calendar_table')",
             sql,
         )
         self.assertIn("JSON_OBJECT('normalized_table', 'book_sheetb'", sql)
         self.assertIn("JSON_OBJECT('日期', 'DATE NULL')", sql)
         self.assertIn("%Y/%m/%d", sql)
+        self.assertIn("%m/%d/%Y", sql)
         self.assertIn("calendar_table", sql)
+        self.assertIn("book_sheetb_overlaps", sql)
         self.assertIn("ON DUPLICATE KEY UPDATE", sql)
 
 
