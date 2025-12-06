@@ -210,6 +210,8 @@ def test_upload_flow_stages_then_enqueues(monkeypatch, staged_upload):
     assert captured["file_size"] == staging_payload["file_size"]
     assert captured["workbook_name"] == staging_payload["original_filename"]
     assert captured["sheet"] == "Sheet A"
+    assert captured["conflict_resolution"] == "append"
+    assert captured.get("time_ranges") is None
 
 
 def test_create_upload_limit_violation(monkeypatch):

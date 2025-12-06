@@ -215,6 +215,8 @@ def enqueue_job(
     db_settings: Mapping[str, Any] | None = None,
     max_file_size: int | None = None,
     max_rows: int | None = None,
+    time_ranges: list[Mapping[str, object]] | None = None,
+    conflict_resolution: str = "append",
 ) -> tuple[str, Any]:
     """Create a job record and enqueue work on the Redis queue."""
 
@@ -249,6 +251,8 @@ def enqueue_job(
         "source_year": source_year,
         "batch_id": batch_id,
         "db_settings": db_settings,
+        "time_ranges": time_ranges,
+        "conflict_resolution": conflict_resolution,
     }
 
     rq_job = queue.enqueue(process_job, job.job_id, payload, job_id=job.job_id)
@@ -311,6 +315,8 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             db_settings=db_settings,
             job_id=job_id,
             status_notifier=_notify,
+            time_ranges=payload.get("time_ranges"),
+            conflict_resolution=payload.get("conflict_resolution", "append"),
         )
     except pipeline.PipelineExecutionError as exc:
         if exc.result is not None:
@@ -339,9 +345,12 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             message += f" (and {len(result.validation_errors) - 3} more)"
         job_store.mark_error(job_id, message=message, db_settings=db_settings)
     elif result.skipped:
+        message = "Duplicate upload detected"
+        if result.conflict_resolution == "skip":
+            message = "Upload skipped due to overlapping records"
         job_store.mark_loaded(
             job_id,
-            message="Duplicate upload detected",
+            message=message,
             db_settings=db_settings,
         )
     else:
