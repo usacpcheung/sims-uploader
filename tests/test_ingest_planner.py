@@ -171,6 +171,12 @@ class SqlGenerationTests(unittest.TestCase):
         self.assertIn("book_sheetb_raw", sql)
         self.assertIn("JSON_ARRAY('學生編號', '姓名')", sql)
         self.assertIn("JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名')", sql)
+        self.assertIn(
+            "JSON_OBJECT('學生編號', '學生編號', '姓名', '姓名'),\n        "
+            "JSON_OBJECT('normalized_table', 'book_sheeta', 'column_types', "
+            "JSON_OBJECT('學生編號', 'INTEGER NULL', '姓名', 'VARCHAR(255) NULL')),",
+            sql,
+        )
         self.assertIn("JSON_OBJECT('normalized_table', 'book_sheetb'", sql)
         self.assertIn("JSON_OBJECT('日期', 'DATE NULL')", sql)
         self.assertIn("%Y/%m/%d", sql)

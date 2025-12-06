@@ -387,10 +387,10 @@ def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
             f"        '{_sql_escape(str(sheet.get('staging_table', '')))}',",
             f"        {_json_array_sql(metadata)},",
             f"        {_json_array_sql(headers)},",
-            f"        {_json_object_sql(column_mappings_pairs)}",
-            f"        {_json_object_sql(options_pairs)}",
-            f"        {_nullable_text_sql(time_range_column)}",
-            f"        {_nullable_text_sql(time_range_format)}",
+            f"        {_json_object_sql(column_mappings_pairs)},",
+            f"        {_json_object_sql(options_pairs)},",
+            f"        {_nullable_text_sql(time_range_column)},",
+            f"        {_nullable_text_sql(time_range_format)},",
             f"        {_nullable_text_sql(overlap_target_table)}",
         ]
     ) + "\n    )"
