@@ -290,7 +290,8 @@ def test_create_upload_returns_overlap(monkeypatch):
     assert not enqueue_called
     payload = response.json()
     assert payload["job"] is None
-    assert payload["overlaps"][0]["target_table"] == "calendar_table"
+    assert payload["overlap_detected"]["overlaps"][0]["target_table"] == "calendar_table"
+    assert "overlap" in payload["overlap_detected"].get("summary", "").lower()
 
 
 def test_get_upload_detail_with_results(monkeypatch):

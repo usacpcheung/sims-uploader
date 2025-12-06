@@ -42,6 +42,7 @@ new workbook. Flow:
 | `row_count` | integer | ❌ | Used by the queue helper for preflight limit checks. |
 | `max_file_size` | integer | ❌ | Optional override for instance-wide limit. Leave blank to rely on defaults. |
 | `max_rows` | integer | ❌ | Optional override for maximum row count. |
+| `conflict_resolution` | string | ❌ | One of `append` (default), `replace`, or `skip`. Set to resolve detected overlaps before queueing. |
 
 ### Client-side validation and defaults
 
@@ -60,6 +61,11 @@ view.
 
 * `UploadLimitExceeded` → `400` with `detail` explaining the file size/row
   violation. Display this inline above the form.
+* Overlap detection → `409` with `overlap_detected` that includes a human summary
+  and an array of overlapping ranges (`target_table`, `time_range_column`,
+  `requested_*`, `existing_*`, `record_id`). Surface this block as an inline
+  warning and provide buttons to resubmit with `conflict_resolution` = `append`,
+  `replace`, or `skip` so the preflight can succeed on retry.
 * Validation or lookup failures during job creation raise `ValueError`.
   - Messages containing “not found/does not exist” map to `404`; surface them as
     a dismissible alert.
