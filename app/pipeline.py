@@ -311,6 +311,7 @@ def run_pipeline(
                     staging_table,
                     [row["id"] for row in staging_rows],
                     file_hash=file_hash,
+                    status="overlap_skip",
                 )
                 connection.commit()
                 return PipelineResult(
@@ -356,6 +357,7 @@ def run_pipeline(
                 staging_table,
                 [row["id"] for row in staging_rows],
                 file_hash=file_hash,
+                status="processed",
             )
             connection.commit()
         except Exception as exc:

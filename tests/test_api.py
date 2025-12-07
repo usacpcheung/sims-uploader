@@ -25,7 +25,15 @@ from app import storage
 from tests import test_job_runner
 
 
-def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
+def _make_job(
+    job_id: str = "job-123",
+    *,
+    latest_message: str | None = None,
+    processed_rows: int | None = None,
+    successful_rows: int | None = None,
+    rejected_rows: int | None = None,
+    normalized_table_name: str | None = None,
+) -> job_store.UploadJob:
     now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
     return job_store.UploadJob(
         job_id=job_id,
@@ -36,6 +44,11 @@ def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
         status="Queued",
         created_at=now,
         updated_at=now,
+        latest_message=latest_message,
+        processed_rows=processed_rows,
+        successful_rows=successful_rows,
+        rejected_rows=rejected_rows,
+        normalized_table_name=normalized_table_name,
     )
 
 
@@ -654,7 +667,15 @@ def test_list_upload_events(monkeypatch):
 
 
 def test_list_recent_uploads(monkeypatch):
-    jobs = [_make_job("job-1"), _make_job("job-2")]
+    jobs = [
+        _make_job(
+            "job-1",
+            latest_message="Upload skipped due to overlapping records",
+            processed_rows=0,
+            rejected_rows=3,
+        ),
+        _make_job("job-2"),
+    ]
     monkeypatch.setattr(job_store, "list_recent_jobs", lambda limit=20: jobs)
 
     client = TestClient(api.app)
@@ -663,3 +684,5 @@ def test_list_recent_uploads(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert [job["job_id"] for job in payload] == ["job-1", "job-2"]
+    assert payload[0]["latest_message"] == "Upload skipped due to overlapping records"
+    assert payload[0]["rejected_rows"] == 3

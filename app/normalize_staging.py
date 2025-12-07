@@ -705,6 +705,7 @@ def mark_staging_rows_processed(
     *,
     file_hash: str,
     processed_at: _dt.datetime | None = None,
+    status: str | None = "processed",
 ) -> _dt.datetime | None:
     """Mark staging rows as processed for the given file hash.
 
@@ -722,11 +723,11 @@ def mark_staging_rows_processed(
 
     sql = (
         f"UPDATE `{staging_table}` "
-        "SET processed_at = %s "
+        "SET processed_at = %s, status = %s "
         "WHERE file_hash = %s "
         "AND (processed_at IS NULL OR processed_at = '0000-00-00 00:00:00')"
     )
-    params = (processed_at, file_hash)
+    params = (processed_at, status, file_hash)
 
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
