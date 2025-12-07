@@ -41,6 +41,11 @@ class UploadJobModel(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    latest_message: str | None = None
+    processed_rows: int | None = None
+    successful_rows: int | None = None
+    rejected_rows: int | None = None
+    normalized_table_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
