@@ -541,6 +541,41 @@ def _quote_identifier(identifier: str) -> str:
     return f"`{identifier.replace('`', '``')}`"
 
 
+def _ensure_status_metadata_column(
+    table_name: str,
+    *,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> bool:
+    owns_connection = connection is None
+    if owns_connection:
+        settings = _normalise_db_settings(db_settings)
+        connection = pymysql.connect(**settings)
+
+    try:
+        try:
+            columns = _fetch_table_columns(
+                table_name, connection=connection, db_settings=db_settings
+            )
+        except TableMissingError:
+            return False
+
+        if any(column.get("name") == "status" for column in columns):
+            return False
+
+        status_type = _default_metadata_column_definitions()["status"]
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"ALTER TABLE {_quote_identifier(table_name)} "
+                f"ADD COLUMN {_quote_identifier('status')} {status_type}"
+            )
+        connection.commit()
+        return True
+    finally:
+        if owns_connection and connection is not None:
+            connection.close()
+
+
 def _ensure_staging_columns(
     *,
     headers: Sequence[str],
@@ -590,9 +625,7 @@ def _ensure_staging_columns(
 
         missing_columns: list[tuple[str, str]] = []
         modify_columns: list[tuple[str, str]] = []
-        metadata_targets = (
-            metadata_columns if metadata_columns else set(metadata_defaults.keys())
-        )
+        metadata_targets = set(metadata_defaults.keys()) | metadata_columns
 
         for column_name in metadata_targets:
             if column_name in column_details:
@@ -732,6 +765,9 @@ def _staging_file_hash_exists(
         settings = _normalise_db_settings(db_settings)
         connection = pymysql.connect(**settings)
     try:
+        _ensure_status_metadata_column(
+            table_name, connection=connection, db_settings=db_settings
+        )
         with connection.cursor() as cur:
             cur.execute(
                 f"SELECT status FROM `{table_name}` "

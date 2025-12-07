@@ -441,12 +441,64 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
         self.assertTrue(schema_changed)
         self.assertTrue(connection.table_created)
-        self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.commits, 2)
         self.assertGreaterEqual(len(connection.commands), 2)
         select_query, _ = connection.commands[0]
         create_query, _ = connection.commands[1]
         self.assertIn("SELECT COLUMN_NAME", select_query)
         self.assertIn("CREATE TABLE", create_query)
+
+    def test_ensure_staging_columns_backfills_default_metadata_columns(self):
+        connection = _DDLTrackingConnection()
+        helper = _DDLTrackingCursor(connection)
+        connection.tables["teach_record_raw"] = OrderedDict(
+            (
+                ("id", helper._build_column_details("bigint(20) unsigned not null")),
+                ("file_hash", helper._build_column_details("char(64) not null")),
+                ("batch_id", helper._build_column_details("char(36) null")),
+                ("source_year", helper._build_column_details("int null")),
+                ("ingested_at", helper._build_column_details("datetime not null")),
+                ("processed_at", helper._build_column_details("datetime null")),
+            )
+        )
+
+        headers: list[str] = []
+        config = {
+            "table": "teach_record_raw",
+            "metadata_columns": ["id", "file_hash", "ingested_at"],
+            "metadata_column_order": ["id", "file_hash", "ingested_at"],
+            "required_columns": [],
+            "required_column_order": [],
+            "column_types": {},
+        }
+
+        schema_changed = prep_excel._ensure_staging_columns(
+            headers=headers,
+            config=config,
+            connection=connection,
+        )
+
+        self.assertTrue(schema_changed)
+        self.assertIn("status", connection.tables["teach_record_raw"])
+        self.assertEqual(connection.commits, 1)
+
+    def test_ensure_status_metadata_column_adds_missing_column(self):
+        connection = _DDLTrackingConnection()
+        helper = _DDLTrackingCursor(connection)
+        connection.tables["teach_record_raw"] = OrderedDict(
+            (
+                ("id", helper._build_column_details("bigint(20) unsigned not null")),
+                ("file_hash", helper._build_column_details("char(64) not null")),
+            )
+        )
+
+        added = prep_excel._ensure_status_metadata_column(
+            "teach_record_raw", connection=connection
+        )
+
+        self.assertTrue(added)
+        self.assertIn("status", connection.tables["teach_record_raw"])
+        self.assertEqual(connection.commits, 1)
 
     def test_get_table_config_supports_multiple_workbook_types(self):
         rows = [
@@ -1115,10 +1167,16 @@ class PrepExcelSchemaTests(unittest.TestCase):
         finally:
             os.remove(excel_path)
 
-        self.assertEqual(connection.commands, [])
-        self.assertEqual(connection.commits, 0)
+        added_columns = {
+            cmd.split("ADD COLUMN `", 1)[1].split("`", 1)[0]
+            for cmd, _params in connection.commands
+            if "ADD COLUMN" in cmd
+        }
+        self.assertSetEqual(added_columns, {"id", "processed_at", "status"})
+        self.assertEqual(connection.commits, 1)
 
-    def test_staging_file_hash_exists_with_injected_connection(self):
+    @mock.patch.object(prep_excel, "_ensure_status_metadata_column", return_value=False)
+    def test_staging_file_hash_exists_with_injected_connection(self, _mock_status_column):
         connection = _SequenceConnection([
             {"rows": [], "fetchone": {"status": "processed"}},
         ])
@@ -1134,7 +1192,8 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertEqual(len(connection.cursors), 1)
         self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
 
-    def test_staging_file_hash_exists_ignores_overlap_skip(self):
+    @mock.patch.object(prep_excel, "_ensure_status_metadata_column", return_value=False)
+    def test_staging_file_hash_exists_ignores_overlap_skip(self, _mock_status_column):
         connection = _SequenceConnection([
             {"rows": [], "fetchone": {"status": "overlap_skip"}},
         ])
@@ -1146,6 +1205,22 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertFalse(exists)
         self.assertEqual(len(connection.cursors), 1)
         self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
+
+    def test_staging_file_hash_exists_backfills_status_column(self):
+        connection = _SequenceConnection([
+            {"rows": [], "fetchone": {"status": "processed"}},
+        ])
+
+        with mock.patch.object(
+            prep_excel, "_ensure_status_metadata_column", return_value=True
+        ) as ensure_status:
+            prep_excel._staging_file_hash_exists(
+                "teach_record_raw", "deadbeef", connection=connection
+            )
+
+        ensure_status.assert_called_once_with(
+            "teach_record_raw", connection=connection, db_settings=None
+        )
 
     @mock.patch.object(prep_excel, "_staging_file_hash_exists", return_value=False)
     @mock.patch.object(prep_excel, "_ensure_staging_columns", return_value=False)
