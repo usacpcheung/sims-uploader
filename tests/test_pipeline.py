@@ -153,11 +153,12 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
         ),
     )
 
-    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
         captured.mark_call = {
             "table": table,
             "row_ids": tuple(row_ids),
             "file_hash": file_hash,
+            "status": status,
         }
         return dt.datetime(2024, 5, 1, 12, 30, tzinfo=dt.timezone.utc)
 
@@ -178,6 +179,7 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert len(inserted["prepared"].normalized_rows) == len(staged_rows)
     assert captured.mark_call["file_hash"] == file_hash
     assert captured.mark_call["row_ids"] == (1, 2)
+    assert captured.mark_call["status"] == "processed"
     assert result.file_hash == file_hash
     assert result.staged_rows == len(staged_rows)
     assert result.normalized_rows == len(staged_rows)
@@ -415,12 +417,13 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
 
     marked = {}
 
-    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
         marked.update(
             {
                 "table": table,
                 "row_ids": tuple(row_ids),
                 "file_hash": file_hash,
+                "status": status,
             }
         )
         return dt.datetime(2024, 8, 1, 9, tzinfo=dt.timezone.utc)
@@ -446,6 +449,7 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
     assert result.normalized_rows == len(staged_rows)
     assert marked["row_ids"] == (1, 2)
     assert marked["file_hash"] == file_hash
+    assert marked["status"] == "processed"
     assert marked["table"] == "teach_record_raw"
     assert not connection.rolled_back
     assert connection.committed
@@ -890,8 +894,9 @@ def test_run_pipeline_skips_insertion_on_overlap(monkeypatch):
 
     processed_at = dt.datetime(2024, 5, 1, 13, tzinfo=dt.timezone.utc)
 
-    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
         connection_obj.executed.append(("mark", tuple(row_ids)))
+        connection_obj.executed.append(("status", status))
         return processed_at
 
     monkeypatch.setattr(pipeline.normalize_staging, "mark_staging_rows_processed", fake_mark)
@@ -909,6 +914,7 @@ def test_run_pipeline_skips_insertion_on_overlap(monkeypatch):
     assert result.normalized_rows == 0
     assert result.processed_at == processed_at
     assert ("mark", (1,)) in connection.executed
+    assert ("status", "overlap_skip") in connection.executed
     assert connection.committed
     assert not connection.rolled_back
     assert not insert_called
@@ -1050,6 +1056,9 @@ def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
         "file_size": workbook.stat().st_size,
         "time_ranges": None,
         "conflict_resolution": "append",
+        "normalized_table": None,
+        "overlap_target_table": None,
+        "time_range_column": None,
     }
 
 

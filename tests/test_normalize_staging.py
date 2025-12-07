@@ -439,8 +439,8 @@ def test_mark_staging_rows_processed_updates_by_file_hash(monkeypatch):
     assert timestamp == processed_at
     assert cursor.execute_calls == [
         (
-            "UPDATE `teach_record_raw` SET processed_at = %s "
+            "UPDATE `teach_record_raw` SET processed_at = %s, status = %s "
             "WHERE file_hash = %s AND (processed_at IS NULL OR processed_at = '0000-00-00 00:00:00')",
-            (processed_at, "hash-123"),
+            (processed_at, "processed", "hash-123"),
         )
     ]
