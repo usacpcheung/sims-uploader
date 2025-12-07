@@ -32,6 +32,11 @@ class UploadJob:
     status: str
     created_at: datetime
     updated_at: datetime
+    latest_message: str | None = None
+    processed_rows: int | None = None
+    successful_rows: int | None = None
+    rejected_rows: int | None = None
+    normalized_table_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,11 @@ def _dict_to_upload_job(row: Mapping[str, Any] | None) -> UploadJob:
         status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        latest_message=row.get("latest_message"),
+        processed_rows=row.get("processed_rows"),
+        successful_rows=row.get("successful_rows"),
+        rejected_rows=row.get("rejected_rows"),
+        normalized_table_name=row.get("normalized_table_name"),
     )
 
 
@@ -210,10 +220,51 @@ def list_recent_jobs(
                 (limit,),
             )
             rows = cursor.fetchall()
+
+            if not rows:
+                return []
+
+            job_ids = [row["job_id"] for row in rows]
+            placeholders = ", ".join(["%s"] * len(job_ids))
+
+            cursor.execute(
+                (
+                    "SELECT job_id, status, message, event_at, event_id "
+                    "FROM `upload_job_events` "
+                    f"WHERE job_id IN ({placeholders}) "
+                    "ORDER BY event_at DESC, event_id DESC"
+                ),
+                job_ids,
+            )
+            latest_messages: dict[str, str | None] = {}
+            for event in cursor.fetchall():
+                if event["job_id"] in latest_messages:
+                    continue
+                latest_messages[event["job_id"]] = event.get("message")
+
+            cursor.execute(
+                (
+                    "SELECT job_id, processed_rows, successful_rows, rejected_rows, "
+                    "normalized_table_name "
+                    "FROM `upload_job_results` "
+                    f"WHERE job_id IN ({placeholders})"
+                ),
+                job_ids,
+            )
+            results_map: dict[str, dict[str, Any]] = {
+                row["job_id"]: row for row in cursor.fetchall()
+            }
     finally:
         connection.close()
 
-    return [_dict_to_upload_job(row) for row in rows]
+    enriched_rows: list[dict[str, Any]] = []
+    for row in rows:
+        row = dict(row)
+        row["latest_message"] = latest_messages.get(row["job_id"])
+        row.update(results_map.get(row["job_id"], {}))
+        enriched_rows.append(row)
+
+    return [_dict_to_upload_job(row) for row in enriched_rows]
 
 
 def create_job(

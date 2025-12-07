@@ -49,6 +49,11 @@ async def render_uploads_list(request: Request) -> HTMLResponse:
         return {
             "job_id": job.job_id,
             "status": job.status,
+            "latest_message": job.latest_message,
+            "processed_rows": job.processed_rows,
+            "successful_rows": job.successful_rows,
+            "rejected_rows": job.rejected_rows,
+            "normalized_table_name": job.normalized_table_name,
             "created_at": _format_dt(job.created_at),
             "updated_at": _format_dt(job.updated_at),
         }

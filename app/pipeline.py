@@ -12,7 +12,14 @@ from typing import Callable, Iterable, Mapping
 
 import pymysql
 
-from app import ingest_excel, job_runner, normalize_staging, prep_excel, validation
+from app import (
+    ingest_excel,
+    job_runner,
+    normalize_staging,
+    prep_excel,
+    time_ranges as time_range_utils,
+    validation,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -135,15 +142,12 @@ def _delete_overlapping_rows(
     validated_column = job_runner._validate_identifier(  # noqa: SLF001 - internal reuse
         time_range_column, label="time range column"
     )
-    start_column = f"`{validated_column}_start`"
-    end_column = f"`{validated_column}_end`"
-
     with connection.cursor() as cursor:
         for start, end in intervals:
             cursor.execute(
                 (
                     f"DELETE FROM `{normalized_table}` "
-                    f"WHERE {start_column} <= %s AND {end_column} >= %s"
+                    f"WHERE `{validated_column}` <= %s AND `{validated_column}` >= %s"
                 ),
                 (end, start),
             )
@@ -160,7 +164,9 @@ def run_pipeline(
     job_id: str | None = None,
     status_notifier: Callable[[str, str | None], None] | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
+    time_range_format: str | None = None,
     conflict_resolution: str = "append",
+    preflight_overlaps: list[Mapping[str, object]] | None = None,
 ) -> PipelineResult:
     conflict_resolution = conflict_resolution or "append"
     allowed_resolutions = {"append", "replace", "skip"}
@@ -238,6 +244,7 @@ def run_pipeline(
         staging_table = table_config["table"]
         normalized_table = table_config.get("normalized_table")
         time_range_column = table_config.get("time_range_column")
+        time_range_format = time_range_format or table_config.get("time_range_format")
         overlap_target_table = table_config.get("overlap_target_table")
         if not normalized_table:
             raise ValueError(
@@ -255,6 +262,11 @@ def run_pipeline(
         connection = pymysql.connect(**settings)
         try:
             staging_rows = _fetch_staging_rows(connection, staging_table, file_hash)
+            derived_time_ranges = time_range_utils.derive_ranges_from_rows(
+                staging_rows,
+                time_range_column=time_range_column,
+                time_range_format=time_range_format,
+            )
             prepared_batch = normalize_staging.prepare_normalization(
                 staging_rows,
                 column_mappings,
@@ -280,13 +292,17 @@ def run_pipeline(
             validation_errors = validation_result.errors
             rejected_rows_path = validation_result.rejected_rows_path
 
-            overlaps = job_runner.check_time_overlap(
-                workbook_type=workbook_type,
-                target_table=overlap_target_table,
-                time_range_column=time_range_column,
-                time_ranges=time_ranges,
-                db_settings=db_settings,
-            )
+            effective_time_ranges = time_ranges or derived_time_ranges or None
+            overlaps = preflight_overlaps
+            if overlaps is None:
+                overlaps = job_runner.check_time_overlap(
+                    workbook_type=workbook_type,
+                    target_table=overlap_target_table,
+                    time_range_column=time_range_column,
+                    time_ranges=effective_time_ranges,
+                    time_range_format=time_range_format,
+                    db_settings=db_settings,
+                )
 
             connection.begin()
             if overlaps and conflict_resolution == "skip":
@@ -295,6 +311,7 @@ def run_pipeline(
                     staging_table,
                     [row["id"] for row in staging_rows],
                     file_hash=file_hash,
+                    status="overlap_skip",
                 )
                 connection.commit()
                 return PipelineResult(
@@ -340,6 +357,7 @@ def run_pipeline(
                 staging_table,
                 [row["id"] for row in staging_rows],
                 file_hash=file_hash,
+                status="processed",
             )
             connection.commit()
         except Exception as exc:
@@ -456,23 +474,36 @@ def cli(argv: Iterable[str] | None = None) -> str:
         raise SystemExit(1) from exc
 
     try:
-        time_ranges = _parse_time_ranges_arg(args.time_range)
+        requested_time_ranges = _parse_time_ranges_arg(args.time_range)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
-    if not time_ranges:
-        time_ranges = None
+    if not requested_time_ranges:
+        requested_time_ranges = None
 
     table_config = prep_excel._get_table_config(
         args.sheet, workbook_type=args.workbook_type
+    )
+    options = table_config.get("options") or {}
+    derived_time_ranges = time_range_utils.derive_ranges_from_workbook(
+        args.workbook,
+        sheet=args.sheet,
+        workbook_type=args.workbook_type,
+        time_range_column=table_config.get("time_range_column"),
+        time_range_format=table_config.get("time_range_format"),
+        rename_last_subject=bool(options.get("rename_last_subject")),
+    )
+    effective_time_ranges = (
+        requested_time_ranges or derived_time_ranges or None
     )
 
     overlaps = job_runner.check_time_overlap(
         workbook_type=args.workbook_type,
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
-        time_ranges=time_ranges,
+        time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
     )
     if overlaps and args.conflict_resolution == "append":
         print("Upload overlaps existing records:", file=sys.stderr)
@@ -493,8 +524,11 @@ def cli(argv: Iterable[str] | None = None) -> str:
             source_year=args.source_year,
             batch_id=args.batch_id,
             file_size=file_size,
-            time_ranges=time_ranges,
+            time_ranges=effective_time_ranges,
             conflict_resolution=args.conflict_resolution,
+            normalized_table=table_config.get("normalized_table"),
+            overlap_target_table=table_config.get("overlap_target_table"),
+            time_range_column=table_config.get("time_range_column"),
         )
     except job_runner.UploadLimitExceeded as exc:
         print(f"Upload rejected: {exc}", file=sys.stderr)
