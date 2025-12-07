@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from app import job_runner, job_store
+from app import job_runner, job_store, prep_excel, time_ranges as time_range_utils
 from app.config import get_upload_storage_dir
 from app.storage import generate_stored_path, get_original_filename, validate_extension
 from app.web import router as web_router
@@ -41,6 +41,11 @@ class UploadJobModel(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    latest_message: str | None = None
+    processed_rows: int | None = None
+    successful_rows: int | None = None
+    rejected_rows: int | None = None
+    normalized_table_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -81,6 +86,11 @@ class UploadJobDetailModel(BaseModel):
     result: UploadJobResultModel | None = None
 
 
+class ParsedTimeRange(BaseModel):
+    start: datetime
+    end: datetime
+
+
 class EnqueueUploadRequest(BaseModel):
     """Request body for ``POST /uploads``."""
 
@@ -95,12 +105,34 @@ class EnqueueUploadRequest(BaseModel):
     row_count: int | None = None
     max_file_size: int | None = None
     max_rows: int | None = None
+    time_ranges: list[ParsedTimeRange] | None = None
+    overlap_acknowledged: bool = False
+    conflict_resolution: Literal["append", "replace", "skip"] = "append"
+
+
+class OverlapDetail(BaseModel):
+    target_table: str
+    time_range_column: str
+    requested_start: datetime
+    requested_end: datetime
+    existing_start: datetime | None = None
+    existing_end: datetime | None = None
+    record_id: int | None = None
+
+
+class OverlapDetected(BaseModel):
+    """Payload returned when overlap preflight checks fail."""
+
+    summary: str | None = None
+    overlaps: list[OverlapDetail]
 
 
 class EnqueueUploadResponse(BaseModel):
     """Response body after enqueueing an upload job."""
 
-    job: UploadJobModel
+    job: UploadJobModel | None = None
+    overlaps: list[OverlapDetail] | None = None
+    overlap_detected: OverlapDetected | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -162,6 +194,46 @@ if PipelineExecutionError is not None:  # pragma: no cover - registration happen
 def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
     """Create a new upload job and enqueue it for background processing."""
 
+    table_config = prep_excel._get_table_config(
+        payload.sheet, workbook_type=payload.workbook_type
+    )
+    options = table_config.get("options") or {}
+    derived_time_ranges = time_range_utils.derive_ranges_from_workbook(
+        payload.workbook_path,
+        sheet=payload.sheet,
+        workbook_type=payload.workbook_type,
+        time_range_column=table_config.get("time_range_column"),
+        time_range_format=table_config.get("time_range_format"),
+        rename_last_subject=bool(options.get("rename_last_subject")),
+    )
+    payload_time_ranges = (
+        [range_.model_dump() for range_ in payload.time_ranges]
+        if payload.time_ranges
+        else []
+    )
+    effective_time_ranges = payload_time_ranges or derived_time_ranges or None
+
+    overlaps = job_runner.check_time_overlap(
+        workbook_type=payload.workbook_type,
+        target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
+        time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
+    )
+    if overlaps and payload.conflict_resolution == "append":
+        if not payload.overlap_acknowledged:
+            primary_overlap = overlaps[0]
+            table = primary_overlap.get("target_table") or "target table"
+            column = primary_overlap.get("time_range_column") or "time range"
+            summary = f"Detected overlapping time ranges in {table} ({column})"
+            overlap_detected = OverlapDetected(summary=summary, overlaps=overlaps)
+            return JSONResponse(
+                status_code=HTTPStatus.CONFLICT,
+                content=EnqueueUploadResponse(
+                    overlaps=overlaps, overlap_detected=overlap_detected
+                ).model_dump(mode="json"),
+            )
+
     job_id, _ = job_runner.enqueue_job(
         workbook_path=payload.workbook_path,
         sheet=payload.sheet,
@@ -174,6 +246,12 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         row_count=payload.row_count,
         max_file_size=payload.max_file_size,
         max_rows=payload.max_rows,
+        time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
+        conflict_resolution=payload.conflict_resolution,
+        normalized_table=table_config.get("normalized_table"),
+        overlap_target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
     )
     job = job_store.get_job(job_id)
     return EnqueueUploadResponse(job=job)

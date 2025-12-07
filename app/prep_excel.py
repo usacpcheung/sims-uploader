@@ -59,6 +59,7 @@ def _default_metadata_column_definitions() -> "OrderedDict[str, str]":
             ("source_year", "INT NULL"),
             ("ingested_at", "DATETIME NOT NULL"),
             ("processed_at", "DATETIME NULL DEFAULT NULL"),
+            ("status", "VARCHAR(32) NULL"),
         )
     )
 
@@ -220,6 +221,16 @@ def _loads_json(value):
     return value
 
 
+def _clean_optional_text(value: object) -> str | None:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _normalise_db_settings(db_settings: Mapping[str, object] | None) -> dict[str, object]:
     if db_settings is None:
         return dict(DB)
@@ -252,6 +263,9 @@ def _parse_sheet_config_rows(
         required_columns = _loads_json(row.get("required_columns")) or []
         options = _loads_json(row.get("options")) or {}
         column_mappings = _loads_json(row.get("column_mappings"))
+        time_range_column = _clean_optional_text(row.get("time_range_column"))
+        time_range_format = _clean_optional_text(row.get("time_range_format"))
+        overlap_target_table = _clean_optional_text(row.get("overlap_target_table"))
         normalized_table_source = "none"
         normalized_table = row.get("normalized_table")
         if isinstance(normalized_table, str):
@@ -326,6 +340,15 @@ def _parse_sheet_config_rows(
                     cleaned_overrides[key_text] = type_text
                 if cleaned_overrides:
                     normalized_column_type_overrides = cleaned_overrides
+            time_range_column = time_range_column or _clean_optional_text(
+                options.get("time_range_column")
+            )
+            time_range_format = time_range_format or _clean_optional_text(
+                options.get("time_range_format")
+            )
+            overlap_target_table = overlap_target_table or _clean_optional_text(
+                options.get("overlap_target_table")
+            )
         if normalized_table is None:
             staging_table = row.get("staging_table")
             if isinstance(staging_table, str):
@@ -358,6 +381,9 @@ def _parse_sheet_config_rows(
             "normalized_metadata_columns": normalized_metadata_columns,
             "reserved_source_columns": reserved_source_columns,
             "normalized_column_type_overrides": normalized_column_type_overrides,
+            "time_range_column": time_range_column,
+            "time_range_format": time_range_format,
+            "overlap_target_table": overlap_target_table,
         }
         normalized_sources[key] = normalized_table_source
     return config
@@ -374,7 +400,10 @@ def _load_sheet_config(connection) -> dict[str, dict[str, dict[str, object]]]:
                        metadata_columns,
                        required_columns,
                        column_mappings,
-                       options
+                       options,
+                       time_range_column,
+                       time_range_format,
+                       overlap_target_table
                   FROM {CONFIG_TABLE}
                 """
             )
@@ -395,6 +424,9 @@ def _load_sheet_config(connection) -> dict[str, dict[str, dict[str, object]]]:
             rows = cur.fetchall()
             for row in rows:
                 row.setdefault("column_mappings", None)
+                row.setdefault("time_range_column", None)
+                row.setdefault("time_range_format", None)
+                row.setdefault("overlap_target_table", None)
                 row["workbook_type"] = "default"
         else:
             rows = cur.fetchall()
@@ -509,6 +541,41 @@ def _quote_identifier(identifier: str) -> str:
     return f"`{identifier.replace('`', '``')}`"
 
 
+def _ensure_status_metadata_column(
+    table_name: str,
+    *,
+    connection=None,
+    db_settings: Mapping[str, object] | None = None,
+) -> bool:
+    owns_connection = connection is None
+    if owns_connection:
+        settings = _normalise_db_settings(db_settings)
+        connection = pymysql.connect(**settings)
+
+    try:
+        try:
+            columns = _fetch_table_columns(
+                table_name, connection=connection, db_settings=db_settings
+            )
+        except TableMissingError:
+            return False
+
+        if any(column.get("name") == "status" for column in columns):
+            return False
+
+        status_type = _default_metadata_column_definitions()["status"]
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"ALTER TABLE {_quote_identifier(table_name)} "
+                f"ADD COLUMN {_quote_identifier('status')} {status_type}"
+            )
+        connection.commit()
+        return True
+    finally:
+        if owns_connection and connection is not None:
+            connection.close()
+
+
 def _ensure_staging_columns(
     *,
     headers: Sequence[str],
@@ -558,9 +625,7 @@ def _ensure_staging_columns(
 
         missing_columns: list[tuple[str, str]] = []
         modify_columns: list[tuple[str, str]] = []
-        metadata_targets = (
-            metadata_columns if metadata_columns else set(metadata_defaults.keys())
-        )
+        metadata_targets = set(metadata_defaults.keys()) | metadata_columns
 
         for column_name in metadata_targets:
             if column_name in column_details:
@@ -700,12 +765,30 @@ def _staging_file_hash_exists(
         settings = _normalise_db_settings(db_settings)
         connection = pymysql.connect(**settings)
     try:
+        _ensure_status_metadata_column(
+            table_name, connection=connection, db_settings=db_settings
+        )
         with connection.cursor() as cur:
             cur.execute(
-                f"SELECT 1 FROM `{table_name}` WHERE file_hash = %s LIMIT 1",
+                f"SELECT status FROM `{table_name}` "
+                "WHERE file_hash = %s "
+                "ORDER BY ingested_at DESC, id DESC "
+                "LIMIT 1",
                 (file_hash,),
             )
-            return cur.fetchone() is not None
+            row = cur.fetchone()
+            if row is None:
+                return False
+
+            status = None
+            if isinstance(row, Mapping):
+                status = row.get("status")
+            elif isinstance(row, (tuple, list)):
+                status = row[0] if row else None
+            else:
+                status = row
+
+            return status != "overlap_skip"
     finally:
         if owns_connection:
             connection.close()

@@ -240,6 +240,21 @@ def _sql_escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _clean_optional_text(value: object) -> str | None:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _nullable_text_sql(value: str | None) -> str:
+    if value is None:
+        return "NULL"
+    return f"'{_sql_escape(value)}'"
+
+
 def _json_array_sql(values: Iterable[str]) -> str:
     escaped = ", ".join(f"'{_sql_escape(v)}'" for v in values)
     return f"JSON_ARRAY({escaped})"
@@ -332,12 +347,17 @@ def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
     metadata = sheet.get("metadata_columns", [])
     headers = sheet.get("clean_headers", [])
     staging_cols = sheet.get("suggested_staging_columns", [])
+    time_range_column = _clean_optional_text(sheet.get("time_range_column"))
+    time_range_format = _clean_optional_text(sheet.get("time_range_format"))
+    overlap_target_table = _clean_optional_text(sheet.get("overlap_target_table"))
 
     column_mappings_pairs: list[tuple[str, str, bool]] = []
     for raw, staged in zip(headers, staging_cols):
         column_mappings_pairs.append((str(raw), str(staged), False))
 
-    column_types = sheet.get("options", {}).get("column_types", {})
+    options = sheet.get("options", {}) or {}
+
+    column_types = options.get("column_types", {})
     column_types_pairs = [
         (str(column), str(sql_type), False) for column, sql_type in column_types.items()
     ]
@@ -345,9 +365,21 @@ def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
     # options currently include normalized_table and column_types; keep this builder
     # tolerant so additional keys can be added without reworking SQL escaping logic.
     options_pairs = [
-        ("normalized_table", str(sheet.get("options", {}).get("normalized_table", "")), False),
+        ("normalized_table", str(options.get("normalized_table", "")), False),
         ("column_types", _json_object_sql(column_types_pairs), True),
     ]
+
+    for key in ("time_range_column", "time_range_format", "overlap_target_table"):
+        value = options.get(key)
+        if value is not None:
+            options_pairs.append((key, str(value), False))
+
+    if not time_range_column:
+        time_range_column = _clean_optional_text(options.get("time_range_column"))
+    if not time_range_format:
+        time_range_format = _clean_optional_text(options.get("time_range_format"))
+    if not overlap_target_table:
+        overlap_target_table = _clean_optional_text(options.get("overlap_target_table"))
 
     return "\n    (\n" + "\n".join(
         [
@@ -357,7 +389,10 @@ def _build_value_block(sheet: dict[str, object], workbook_type: str) -> str:
             f"        {_json_array_sql(metadata)},",
             f"        {_json_array_sql(headers)},",
             f"        {_json_object_sql(column_mappings_pairs)},",
-            f"        {_json_object_sql(options_pairs)}",
+            f"        {_json_object_sql(options_pairs)},",
+            f"        {_nullable_text_sql(time_range_column)},",
+            f"        {_nullable_text_sql(time_range_format)},",
+            f"        {_nullable_text_sql(overlap_target_table)}",
         ]
     ) + "\n    )"
 
@@ -379,7 +414,10 @@ def build_ingest_config_sql(plan: dict[str, object], workbook_type: str = "defau
         "    metadata_columns,\n"
         "    required_columns,\n"
         "    column_mappings,\n"
-        "    options\n"
+        "    options,\n"
+        "    time_range_column,\n"
+        "    time_range_format,\n"
+        "    overlap_target_table\n"
         ")\nVALUES"
     )
 
@@ -389,7 +427,10 @@ def build_ingest_config_sql(plan: dict[str, object], workbook_type: str = "defau
         "    metadata_columns = VALUES(metadata_columns),\n"
         "    required_columns = VALUES(required_columns),\n"
         "    column_mappings = VALUES(column_mappings),\n"
-        "    options = VALUES(options);"
+        "    options = VALUES(options),\n"
+        "    time_range_column = VALUES(time_range_column),\n"
+        "    time_range_format = VALUES(time_range_format),\n"
+        "    overlap_target_table = VALUES(overlap_target_table);"
     )
 
     return header + ",".join(values_blocks) + "\n" + footer + "\n"

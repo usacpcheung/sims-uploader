@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS sheet_ingest_config (
     required_columns JSON NOT NULL DEFAULT (JSON_ARRAY()),
     column_mappings JSON NULL,
     options JSON NULL,
+    time_range_column VARCHAR(255) NULL,
+    time_range_format VARCHAR(255) NULL,
+    overlap_target_table VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -28,82 +31,12 @@ INSERT INTO sheet_ingest_config (
     metadata_columns,
     required_columns,
     column_mappings,
-    options
+    options,
+    time_range_column,
+    time_range_format,
+    overlap_target_table
 )
 VALUES
-    (
-        'prototype_teaching_records',
-        'TEACH_RECORD',
-        'teach_record_raw',
-        JSON_ARRAY('id', 'file_hash', 'batch_id', 'source_year', 'ingested_at', 'processed_at'),
-        JSON_ARRAY(
-            '記錄狀態',
-            '日期',
-            '任教老師',
-            '學生編號',
-            '姓名',
-            '英文姓名',
-            '性別',
-            '學生級別',
-            '病房',
-            '病床',
-            '出勤 (來自出勤記錄輸入)',
-            '出勤',
-            '教學組別',
-            '科目',
-            '取代科目',
-            '教授科目',
-            '課程級別',
-            '教材',
-            '課題',
-            '教學重點1',
-            '教學重點2',
-            '教學重點3',
-            '教學重點4',
-            '自定課題',
-            '自定教學重點',
-            '練習',
-            '上課時數',
-            '備註',
-            '教學跟進/回饋'
-        ),
-        JSON_OBJECT(
-            '記錄狀態', '記錄狀態',
-            '日期', '日期',
-            '任教老師', '任教老師',
-            '學生編號', '學生編號',
-            '姓名', '姓名',
-            '英文姓名', '英文姓名',
-            '性別', '性別',
-            '學生級別', '學生級別',
-            '病房', '病房',
-            '病床', '病床',
-            '出勤 (來自出勤記錄輸入)', '出勤 (來自出勤記錄輸入)',
-            '出勤', '出勤',
-            '教學組別', '教學組別',
-            '科目', '科目',
-            '取代科目', '取代科目',
-            '教授科目', '教授科目',
-            '課程級別', '課程級別',
-            '教材', '教材',
-            '課題', '課題',
-            '教學重點1', '教學重點1',
-            '教學重點2', '教學重點2',
-            '教學重點3', '教學重點3',
-            '教學重點4', '教學重點4',
-            '自定課題', '自定課題',
-            '自定教學重點', '自定教學重點',
-            '練習', '練習',
-            '上課時數', '上課時數',
-            '備註', '備註',
-            '教學跟進/回饋', '教學跟進/回饋'
-        ),
-        JSON_OBJECT(
-            'rename_last_subject', true,
-            'normalized_table', 'teach_record_normalized',
-            'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
-        )
-    ),
     (
         'default',
         'TEACH_RECORD',
@@ -175,14 +108,20 @@ VALUES
             'rename_last_subject', true,
             'normalized_table', 'teach_record_normalized',
             'column_types', JSON_OBJECT('教學跟進/回饋', 'TEXT NULL')
-        )
+        ),
+        '日期',
+        '%m/%d/%Y',
+        'teach_record_normalized'
     )
 ON DUPLICATE KEY UPDATE
     staging_table = VALUES(staging_table),
     metadata_columns = VALUES(metadata_columns),
     required_columns = VALUES(required_columns),
     column_mappings = VALUES(column_mappings),
-    options = VALUES(options);
+    options = VALUES(options),
+    time_range_column = VALUES(time_range_column),
+    time_range_format = VALUES(time_range_format),
+    overlap_target_table = VALUES(overlap_target_table);
 
 -- TODO (pending workbook upload):
 -- Add a new VALUES block for the latest Excel template once the file is available in ./uploads.
