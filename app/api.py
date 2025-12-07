@@ -41,6 +41,11 @@ class UploadJobModel(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    latest_message: str | None = None
+    processed_rows: int | None = None
+    successful_rows: int | None = None
+    rejected_rows: int | None = None
+    normalized_table_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -101,6 +106,7 @@ class EnqueueUploadRequest(BaseModel):
     max_file_size: int | None = None
     max_rows: int | None = None
     time_ranges: list[ParsedTimeRange] | None = None
+    overlap_acknowledged: bool = False
     conflict_resolution: Literal["append", "replace", "skip"] = "append"
 
 
@@ -212,19 +218,21 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
     )
     if overlaps and payload.conflict_resolution == "append":
-        primary_overlap = overlaps[0]
-        table = primary_overlap.get("target_table") or "target table"
-        column = primary_overlap.get("time_range_column") or "time range"
-        summary = f"Detected overlapping time ranges in {table} ({column})"
-        overlap_detected = OverlapDetected(summary=summary, overlaps=overlaps)
-        return JSONResponse(
-            status_code=HTTPStatus.CONFLICT,
-            content=EnqueueUploadResponse(
-                overlaps=overlaps, overlap_detected=overlap_detected
-            ).model_dump(mode="json"),
-        )
+        if not payload.overlap_acknowledged:
+            primary_overlap = overlaps[0]
+            table = primary_overlap.get("target_table") or "target table"
+            column = primary_overlap.get("time_range_column") or "time range"
+            summary = f"Detected overlapping time ranges in {table} ({column})"
+            overlap_detected = OverlapDetected(summary=summary, overlaps=overlaps)
+            return JSONResponse(
+                status_code=HTTPStatus.CONFLICT,
+                content=EnqueueUploadResponse(
+                    overlaps=overlaps, overlap_detected=overlap_detected
+                ).model_dump(mode="json"),
+            )
 
     job_id, _ = job_runner.enqueue_job(
         workbook_path=payload.workbook_path,
@@ -239,7 +247,11 @@ def create_upload_job(payload: EnqueueUploadRequest) -> EnqueueUploadResponse:
         max_file_size=payload.max_file_size,
         max_rows=payload.max_rows,
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
         conflict_resolution=payload.conflict_resolution,
+        normalized_table=table_config.get("normalized_table"),
+        overlap_target_table=table_config.get("overlap_target_table"),
+        time_range_column=table_config.get("time_range_column"),
     )
     job = job_store.get_job(job_id)
     return EnqueueUploadResponse(job=job)

@@ -26,6 +26,7 @@
       class="table-wrapper"
       data-fetch-url="{{ request.url_for('list_recent_uploads') }}"
       data-load-error="{{ 'true' if load_error else 'false' }}"
+      data-detail-template="{{ request.url_for('render_upload_detail', job_id='__JOB_ID__') }}"
     >
       <div class="table-state" data-loading-state hidden>Loading recent uploads…</div>
       <div class="table-state table-state--error" data-error-state {% if not load_error %}hidden{% endif %}>
@@ -40,8 +41,11 @@
           <tr>
             <th scope="col">Job ID</th>
             <th scope="col">Status</th>
+            <th scope="col">Summary</th>
+            <th scope="col">Result</th>
             <th scope="col">Created</th>
             <th scope="col">Updated</th>
+            <th scope="col" class="align-right">Actions</th>
           </tr>
         </thead>
         <tbody data-uploads-table-body>
@@ -49,8 +53,19 @@
             <tr>
               <td><code>{{ job.job_id }}</code></td>
               <td class="status">{{ job.status }}</td>
+              <td class="muted">{{ job.latest_message or '—' }}</td>
+              <td class="muted">
+                {% if job.processed_rows is not none or job.rejected_rows is not none %}
+                  {{ (job.processed_rows or 0) | int }} processed{% if job.rejected_rows %}, {{ job.rejected_rows | int }} rejected{% endif %}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
               <td>{{ job.created_at }}</td>
               <td>{{ job.updated_at }}</td>
+              <td class="align-right">
+                <a class="link-button" href="{{ request.url_for('render_upload_detail', job_id=job.job_id) }}">View details</a>
+              </td>
             </tr>
           {% endfor %}
         </tbody>
@@ -70,6 +85,7 @@
       const errorState = document.querySelector('[data-error-state]');
       const fetchContainer = document.querySelector('[data-fetch-url]');
       const fetchUrl = fetchContainer ? fetchContainer.dataset.fetchUrl : null;
+      const detailTemplate = fetchContainer?.dataset.detailTemplate || '';
       const loadError = fetchContainer ? fetchContainer.dataset.loadError === 'true' : false;
       const refreshButton = document.querySelector('[data-refresh-button]');
       const noticeBanner = document.querySelector('[data-queued-notice]');
@@ -108,11 +124,30 @@
         tbody.innerHTML = '';
         jobs.forEach((job) => {
           const row = document.createElement('tr');
+          const detailUrl = detailTemplate
+            ? detailTemplate.replace('__JOB_ID__', encodeURIComponent(job.job_id || ''))
+            : '#';
+          const processed = Number.isFinite(job.processed_rows) ? Number(job.processed_rows) : job.processed_rows;
+          const rejected = Number.isFinite(job.rejected_rows) ? Number(job.rejected_rows) : job.rejected_rows;
+          let resultSummary = '—';
+          if (processed !== undefined && processed !== null) {
+            resultSummary = `${processed} processed`;
+            if (rejected !== undefined && rejected !== null) {
+              resultSummary += `, ${rejected} rejected`;
+            }
+          } else if (rejected !== undefined && rejected !== null) {
+            resultSummary = `0 processed, ${rejected} rejected`;
+          }
           row.innerHTML = `
             <td><code>${job.job_id}</code></td>
             <td class="status">${job.status ?? '—'}</td>
+            <td class="muted">${job.latest_message ?? '—'}</td>
+            <td class="muted">${resultSummary}</td>
             <td>${formatDate(job.created_at)}</td>
             <td>${formatDate(job.updated_at)}</td>
+            <td class="align-right">
+              <a class="link-button" href="${detailUrl}">View details</a>
+            </td>
           `;
           tbody.appendChild(row);
         });
