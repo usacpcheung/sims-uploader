@@ -1120,7 +1120,7 @@ class PrepExcelSchemaTests(unittest.TestCase):
 
     def test_staging_file_hash_exists_with_injected_connection(self):
         connection = _SequenceConnection([
-            {"rows": [], "fetchone": (1,)},
+            {"rows": [], "fetchone": {"status": "processed"}},
         ])
 
         with mock.patch.object(prep_excel.pymysql, "connect") as mock_connect:
@@ -1131,6 +1131,19 @@ class PrepExcelSchemaTests(unittest.TestCase):
         self.assertTrue(exists)
         self.assertFalse(connection.closed)
         self.assertFalse(mock_connect.called)
+        self.assertEqual(len(connection.cursors), 1)
+        self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
+
+    def test_staging_file_hash_exists_ignores_overlap_skip(self):
+        connection = _SequenceConnection([
+            {"rows": [], "fetchone": {"status": "overlap_skip"}},
+        ])
+
+        exists = prep_excel._staging_file_hash_exists(
+            "teach_record_raw", "deadbeef", connection=connection
+        )
+
+        self.assertFalse(exists)
         self.assertEqual(len(connection.cursors), 1)
         self.assertEqual(connection.cursors[0].executed[0][1], ("deadbeef",))
 

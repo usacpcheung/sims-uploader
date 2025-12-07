@@ -59,6 +59,7 @@ def _default_metadata_column_definitions() -> "OrderedDict[str, str]":
             ("source_year", "INT NULL"),
             ("ingested_at", "DATETIME NOT NULL"),
             ("processed_at", "DATETIME NULL DEFAULT NULL"),
+            ("status", "VARCHAR(32) NULL"),
         )
     )
 
@@ -733,10 +734,25 @@ def _staging_file_hash_exists(
     try:
         with connection.cursor() as cur:
             cur.execute(
-                f"SELECT 1 FROM `{table_name}` WHERE file_hash = %s LIMIT 1",
+                f"SELECT status FROM `{table_name}` "
+                "WHERE file_hash = %s "
+                "ORDER BY ingested_at DESC, id DESC "
+                "LIMIT 1",
                 (file_hash,),
             )
-            return cur.fetchone() is not None
+            row = cur.fetchone()
+            if row is None:
+                return False
+
+            status = None
+            if isinstance(row, Mapping):
+                status = row.get("status")
+            elif isinstance(row, (tuple, list)):
+                status = row[0] if row else None
+            else:
+                status = row
+
+            return status != "overlap_skip"
     finally:
         if owns_connection:
             connection.close()
