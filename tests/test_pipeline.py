@@ -12,9 +12,10 @@ from app import ingest_excel, job_runner, pipeline
 
 
 class _Cursor:
-    def __init__(self, rows):
+    def __init__(self, rows, executed_log=None):
         self.rows = rows
         self.executed = []
+        self._log = executed_log
 
     def __enter__(self):
         return self
@@ -24,6 +25,8 @@ class _Cursor:
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
+        if self._log is not None:
+            self._log.append((sql, params))
 
     def fetchall(self):
         return self.rows
@@ -33,6 +36,7 @@ class _Connection:
     def __init__(self, rows):
         self._rows = rows
         self.cursor_calls = []
+        self.executed: list[tuple[str, tuple[object, ...] | None]] = []
         self.begun = False
         self.committed = False
         self.rolled_back = False
@@ -40,7 +44,7 @@ class _Connection:
 
     def cursor(self, cursor_class=None):
         self.cursor_calls.append(cursor_class)
-        return _Cursor(self._rows)
+        return _Cursor(self._rows, self.executed)
 
     def begin(self):
         self.begun = True
@@ -149,11 +153,12 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
         ),
     )
 
-    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
         captured.mark_call = {
             "table": table,
             "row_ids": tuple(row_ids),
             "file_hash": file_hash,
+            "status": status,
         }
         return dt.datetime(2024, 5, 1, 12, 30, tzinfo=dt.timezone.utc)
 
@@ -174,6 +179,7 @@ def test_run_pipeline_threads_file_hash(monkeypatch):
     assert len(inserted["prepared"].normalized_rows) == len(staged_rows)
     assert captured.mark_call["file_hash"] == file_hash
     assert captured.mark_call["row_ids"] == (1, 2)
+    assert captured.mark_call["status"] == "processed"
     assert result.file_hash == file_hash
     assert result.staged_rows == len(staged_rows)
     assert result.normalized_rows == len(staged_rows)
@@ -411,12 +417,13 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
 
     marked = {}
 
-    def fake_mark(connection_obj, table, row_ids, *, file_hash):
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
         marked.update(
             {
                 "table": table,
                 "row_ids": tuple(row_ids),
                 "file_hash": file_hash,
+                "status": status,
             }
         )
         return dt.datetime(2024, 8, 1, 9, tzinfo=dt.timezone.utc)
@@ -442,6 +449,7 @@ def test_run_pipeline_normalizes_zero_date_rows(monkeypatch):
     assert result.normalized_rows == len(staged_rows)
     assert marked["row_ids"] == (1, 2)
     assert marked["file_hash"] == file_hash
+    assert marked["status"] == "processed"
     assert marked["table"] == "teach_record_raw"
     assert not connection.rolled_back
     assert connection.committed
@@ -811,6 +819,198 @@ def test_run_pipeline_expands_normalized_schema(monkeypatch):
     assert connection.committed
 
 
+def test_run_pipeline_skips_insertion_on_overlap(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-123"
+    staged_rows = [
+        {"id": 1, "file_hash": file_hash, "batch_id": "batch-1", "source_year": "2024"}
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-1",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 5, 1, 12, 0, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    prepared = pipeline.normalize_staging.PreparedNormalization(
+        normalized_rows=[(1,)],
+        rejected_rows=[],
+        resolved_mappings=OrderedDict({"col": "col"}),
+        metadata_columns=("raw_id", "file_hash"),
+        ordered_columns=("col",),
+    )
+
+    monkeypatch.setattr(pipeline.prep_excel, "main", lambda *_, **__: (csv_path, file_hash))
+    monkeypatch.setattr(pipeline.prep_excel, "_get_table_config", lambda *_, **__: {
+        "table": "teach_record_raw",
+        "normalized_table": "teach_record_normalized",
+        "column_mappings": None,
+        "overlap_target_table": "calendar",
+        "time_range_column": "period",
+    })
+    monkeypatch.setattr(pipeline.ingest_excel, "load_csv_into_staging", lambda *_, **__: staging_result)
+    monkeypatch.setattr(pipeline.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+    connection = _Connection(staged_rows)
+    monkeypatch.setattr(pipeline.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(pipeline.normalize_staging, "ensure_normalized_schema", lambda *_, **__: None)
+    monkeypatch.setattr(pipeline.normalize_staging, "prepare_normalization", lambda *_, **__: prepared)
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "build_column_coverage",
+        lambda mappings: {},
+    )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
+
+    insert_called = False
+
+    def _fail_insert(*args, **kwargs):
+        nonlocal insert_called
+        insert_called = True
+        raise AssertionError("insert_normalized_rows should not be called when skipping")
+
+    monkeypatch.setattr(pipeline.normalize_staging, "insert_normalized_rows", _fail_insert)
+    monkeypatch.setattr(
+        pipeline.job_runner,
+        "check_time_overlap",
+        lambda **kwargs: [
+            {
+                "target_table": "calendar",
+                "time_range_column": "period",
+                "requested_start": dt.datetime(2024, 1, 1),
+                "requested_end": dt.datetime(2024, 1, 31),
+            }
+        ],
+    )
+
+    processed_at = dt.datetime(2024, 5, 1, 13, tzinfo=dt.timezone.utc)
+
+    def fake_mark(connection_obj, table, row_ids, *, file_hash, status):
+        connection_obj.executed.append(("mark", tuple(row_ids)))
+        connection_obj.executed.append(("status", status))
+        return processed_at
+
+    monkeypatch.setattr(pipeline.normalize_staging, "mark_staging_rows_processed", fake_mark)
+
+    result = pipeline.run_pipeline(
+        "workbook.xlsx",
+        source_year="2024",
+        batch_id="batch-1",
+        conflict_resolution="skip",
+        time_ranges=[{"start": "2024-01-01", "end": "2024-01-31"}],
+    )
+
+    assert result.skipped
+    assert result.inserted_count == 0
+    assert result.normalized_rows == 0
+    assert result.processed_at == processed_at
+    assert ("mark", (1,)) in connection.executed
+    assert ("status", "overlap_skip") in connection.executed
+    assert connection.committed
+    assert not connection.rolled_back
+    assert not insert_called
+
+
+def test_run_pipeline_replaces_overlap_before_insert(monkeypatch):
+    csv_path = "/tmp/fake.csv"
+    file_hash = "hash-123"
+    staged_rows = [
+        {"id": 1, "file_hash": file_hash, "batch_id": "batch-1", "source_year": "2024"}
+    ]
+    staging_result = ingest_excel.StagingLoadResult(
+        staging_table="teach_record_raw",
+        file_hash=file_hash,
+        batch_id="batch-1",
+        source_year="2024",
+        ingested_at=dt.datetime(2024, 5, 1, 12, 0, tzinfo=dt.timezone.utc),
+        rowcount=len(staged_rows),
+    )
+
+    prepared = pipeline.normalize_staging.PreparedNormalization(
+        normalized_rows=[(1,)],
+        rejected_rows=[],
+        resolved_mappings=OrderedDict({"col": "col"}),
+        metadata_columns=("raw_id", "file_hash"),
+        ordered_columns=("col",),
+    )
+
+    monkeypatch.setattr(pipeline.prep_excel, "main", lambda *_, **__: (csv_path, file_hash))
+    monkeypatch.setattr(pipeline.prep_excel, "_get_table_config", lambda *_, **__: {
+        "table": "teach_record_raw",
+        "normalized_table": "teach_record_normalized",
+        "column_mappings": None,
+        "overlap_target_table": "calendar",
+        "time_range_column": "period",
+    })
+    monkeypatch.setattr(pipeline.ingest_excel, "load_csv_into_staging", lambda *_, **__: staging_result)
+    monkeypatch.setattr(pipeline.ingest_excel, "_get_db_settings", lambda overrides=None: {})
+    connection = _Connection(staged_rows)
+    monkeypatch.setattr(pipeline.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(pipeline.normalize_staging, "ensure_normalized_schema", lambda *_, **__: None)
+    monkeypatch.setattr(pipeline.normalize_staging, "prepare_normalization", lambda *_, **__: prepared)
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "build_column_coverage",
+        lambda mappings: {},
+    )
+    monkeypatch.setattr(
+        pipeline.validation,
+        "validate_rows",
+        lambda job_id, prepared, **kwargs: pipeline.validation.ValidationResult(
+            prepared=prepared,
+            rejected_rows_path=None,
+            errors=[],
+        ),
+    )
+
+    monkeypatch.setattr(
+        pipeline.job_runner,
+        "check_time_overlap",
+        lambda **kwargs: [
+            {
+                "target_table": "calendar",
+                "time_range_column": "period",
+                "requested_start": dt.datetime(2024, 1, 1),
+                "requested_end": dt.datetime(2024, 1, 31),
+                "existing_start": dt.datetime(2024, 1, 15),
+                "existing_end": dt.datetime(2024, 1, 20),
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        pipeline.normalize_staging,
+        "insert_normalized_rows",
+        lambda *_, **__: pipeline.normalize_staging.InsertNormalizedRowsResult(
+            inserted_count=1, prepared=prepared
+        ),
+    )
+
+    result = pipeline.run_pipeline(
+        "workbook.xlsx",
+        source_year="2024",
+        batch_id="batch-1",
+        conflict_resolution="replace",
+        time_ranges=[{"start": "2024-01-01", "end": "2024-01-31"}],
+    )
+
+    delete_statements = [sql for sql, _ in connection.executed if "DELETE FROM" in sql]
+    assert delete_statements
+    assert result.inserted_count == 1
+    assert result.processed_at is not None
+    assert connection.committed
+    assert not connection.rolled_back
+
+
 def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
     workbook = tmp_path / "workbook.xlsx"
     workbook.write_bytes(b"data")
@@ -854,6 +1054,11 @@ def test_cli_enqueues_job(monkeypatch, capsys, tmp_path):
         "source_year": "2024",
         "batch_id": "batch-9",
         "file_size": workbook.stat().st_size,
+        "time_ranges": None,
+        "conflict_resolution": "append",
+        "normalized_table": None,
+        "overlap_target_table": None,
+        "time_range_column": None,
     }
 
 

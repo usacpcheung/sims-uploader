@@ -121,6 +121,35 @@
         <input type="number" id="max_rows" name="max_rows" min="0" step="1" />
       </div>
 
+      <input
+        type="hidden"
+        id="conflict_resolution"
+        name="conflict_resolution"
+        value="append"
+      />
+      <input
+        type="hidden"
+        id="overlap_acknowledged"
+        name="overlap_acknowledged"
+        value="false"
+      />
+
+      <div id="overlap-panel" class="alert alert--warning" role="status" hidden>
+        <p id="overlap-summary"></p>
+        <div id="overlap-list" class="overlap-list"></div>
+        <div class="button-row">
+          <button type="button" class="secondary-button" data-resolution="append">
+            Append anyway
+          </button>
+          <button type="button" class="secondary-button" data-resolution="replace">
+            Replace overlaps
+          </button>
+          <button type="button" class="secondary-button" data-resolution="skip">
+            Skip upload
+          </button>
+        </div>
+      </div>
+
       <div class="form-actions">
         <button type="submit" class="primary-button">Submit upload job</button>
         <span id="form-status" role="status" aria-live="polite"></span>
@@ -140,6 +169,7 @@
       const errorBox = document.getElementById('form-errors');
       const statusBox = document.getElementById('form-status');
       const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
+      const booleanFields = new Set(['overlap_acknowledged']);
       const enqueueUrl = form.dataset.enqueueUrl;
       const uploadUrl = form.dataset.uploadUrl;
       const uploadsListUrl = form.dataset.uploadsListUrl;
@@ -151,6 +181,13 @@
       const sheetField = document.getElementById('sheet');
       const sourceYearField = document.getElementById('source_year');
       const workbookTypeField = document.getElementById('workbook_type');
+      const conflictResolutionField = document.getElementById('conflict_resolution');
+      const overlapAcknowledgedField = document.getElementById('overlap_acknowledged');
+      const overlapPanel = document.getElementById('overlap-panel');
+      const overlapSummary = document.getElementById('overlap-summary');
+      const overlapList = document.getElementById('overlap-list');
+      const overlapButtons = document.querySelectorAll('[data-resolution]');
+      let lastPayload = null;
 
       function setDefaultValues() {
         const currentYear = new Date().getFullYear();
@@ -203,6 +240,132 @@
         clearFieldErrors();
       }
 
+      function hideOverlapPanel() {
+        if (!overlapPanel) return;
+        overlapPanel.hidden = true;
+        overlapSummary.textContent = '';
+        if (overlapList) {
+          overlapList.innerHTML = '';
+        }
+        if (overlapAcknowledgedField) {
+          overlapAcknowledgedField.value = 'false';
+        }
+      }
+
+      function setSubmitting(isSubmitting) {
+        const submitButton = form.querySelector('button[type="submit"]');
+        if (submitButton) {
+          submitButton.disabled = isSubmitting;
+        }
+        overlapButtons.forEach((button) => {
+          button.disabled = isSubmitting;
+        });
+      }
+
+      function renderOverlapPanel(overlapDetected) {
+        if (!overlapPanel || !overlapSummary || !overlapList) return;
+        const overlaps = Array.isArray(overlapDetected?.overlaps)
+          ? overlapDetected.overlaps
+          : [];
+
+        const summaryText =
+          overlapDetected?.summary ||
+          (overlaps.length
+            ? `Detected ${overlaps.length} overlapping range(s).`
+            : 'Detected overlapping time ranges.');
+
+        overlapSummary.textContent = summaryText;
+        overlapList.innerHTML = '';
+
+        if (overlaps.length) {
+          const list = document.createElement('ul');
+          overlaps.forEach((overlap) => {
+            const item = document.createElement('li');
+            const requestedRange = [overlap.requested_start, overlap.requested_end]
+              .filter(Boolean)
+              .join(' → ');
+            const existingRange = [overlap.existing_start, overlap.existing_end]
+              .filter(Boolean)
+              .join(' → ');
+            item.textContent =
+              `${overlap.target_table || 'table'} (${overlap.time_range_column || 'range'}) ` +
+              `requested ${requestedRange} overlaps existing ${existingRange}`;
+            list.appendChild(item);
+          });
+          overlapList.appendChild(list);
+        }
+
+        overlapPanel.hidden = false;
+      }
+
+      async function submitPayload(payload) {
+        lastPayload = payload;
+        setSubmitting(true);
+
+        try {
+          const response = await fetch(enqueueUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+
+          const contentType = response.headers.get('content-type');
+          const isJson = contentType && contentType.includes('application/json');
+          const data = isJson ? await response.json() : null;
+
+          if (response.status === 202 && data && data.job && data.job.job_id) {
+            if (statusBox) {
+              statusBox.textContent = 'Upload queued! Redirecting to uploads list…';
+            }
+            const jobId = data.job.job_id;
+            const redirectUrl = new URL(uploadsListUrl, window.location.origin);
+            redirectUrl.searchParams.set(
+              'notice',
+              'Upload queued and will begin processing shortly.'
+            );
+            if (jobId) {
+              redirectUrl.searchParams.set('job_id', jobId);
+            }
+            window.location.assign(redirectUrl.toString());
+            return;
+          }
+
+          if (response.status === 400 && data) {
+            const messages = [data.detail, data.validation_summary].filter(Boolean);
+            if (errorBox) {
+              errorBox.textContent = messages.join(' — ');
+              errorBox.hidden = false;
+            }
+            if (statusBox) {
+              statusBox.textContent = '';
+            }
+            return;
+          }
+
+          if (response.status === 409 && data?.overlap_detected) {
+            if (statusBox) {
+              statusBox.textContent = 'Overlap detected. Choose how to proceed.';
+            }
+            renderOverlapPanel(data.overlap_detected);
+            return;
+          }
+
+          throw new Error('Unexpected response from server');
+        } catch (error) {
+          if (errorBox) {
+            errorBox.textContent = error instanceof Error ? error.message : 'Failed to submit request';
+            errorBox.hidden = false;
+          }
+          if (statusBox) {
+            statusBox.textContent = '';
+          }
+        } finally {
+          setSubmitting(false);
+        }
+      }
+
       function deriveFileMetadata(file) {
         if (!file) return;
         if (workbookNameField && !workbookNameField.value) {
@@ -223,11 +386,15 @@
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         resetFeedback();
-
-        const submitButton = form.querySelector('button[type="submit"]');
-        if (submitButton) {
-          submitButton.disabled = true;
+        if (conflictResolutionField) {
+          conflictResolutionField.value = 'append';
         }
+        if (overlapAcknowledgedField) {
+          overlapAcknowledgedField.value = 'false';
+        }
+        hideOverlapPanel();
+
+        setSubmitting(true);
 
         const selectedFile = workbookFileInput?.files?.[0] || null;
         const manualPath = (manualPathField?.value || '').trim();
@@ -250,9 +417,7 @@
         }
 
         if (hasError) {
-          if (submitButton) {
-            submitButton.disabled = false;
-          }
+          setSubmitting(false);
           return;
         }
 
@@ -266,9 +431,7 @@
             if (statusBox) {
               statusBox.textContent = '';
             }
-            if (submitButton) {
-              submitButton.disabled = false;
-            }
+            setSubmitting(false);
             return;
           }
 
@@ -323,9 +486,7 @@
             if (statusBox) {
               statusBox.textContent = '';
             }
-            if (submitButton) {
-              submitButton.disabled = false;
-            }
+            setSubmitting(false);
             return;
           }
         } else if (workbookPathField) {
@@ -347,54 +508,15 @@
           }
           if (numberFields.has(key)) {
             payload[key] = Number(value);
+          } else if (booleanFields.has(key)) {
+            payload[key] = value === 'true';
           } else {
             payload[key] = value;
           }
         }
 
         try {
-          const response = await fetch(enqueueUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-          });
-
-          const contentType = response.headers.get('content-type');
-          const isJson = contentType && contentType.includes('application/json');
-          const data = isJson ? await response.json() : null;
-
-          if (response.status === 202 && data && data.job && data.job.job_id) {
-            if (statusBox) {
-              statusBox.textContent = 'Upload queued! Redirecting to uploads list…';
-            }
-            const jobId = data.job.job_id;
-            const redirectUrl = new URL(uploadsListUrl, window.location.origin);
-            redirectUrl.searchParams.set(
-              'notice',
-              'Upload queued and will begin processing shortly.'
-            );
-            if (jobId) {
-              redirectUrl.searchParams.set('job_id', jobId);
-            }
-            window.location.assign(redirectUrl.toString());
-            return;
-          }
-
-          if (response.status === 400 && data) {
-            const messages = [data.detail, data.validation_summary].filter(Boolean);
-            if (errorBox) {
-              errorBox.textContent = messages.join(' — ');
-              errorBox.hidden = false;
-            }
-            if (statusBox) {
-              statusBox.textContent = '';
-            }
-            return;
-          }
-
-          throw new Error('Unexpected response from server');
+          await submitPayload(payload);
         } catch (error) {
           if (errorBox) {
             errorBox.textContent = error instanceof Error ? error.message : 'Failed to submit request';
@@ -403,12 +525,36 @@
           if (statusBox) {
             statusBox.textContent = '';
           }
-        } finally {
-          const submitButton = form.querySelector('button[type="submit"]');
-          if (submitButton) {
-            submitButton.disabled = false;
-          }
         }
+      });
+
+      overlapButtons.forEach((button) => {
+        button.addEventListener('click', async (event) => {
+          event.preventDefault();
+          const resolution = button.dataset.resolution;
+          if (!resolution || !lastPayload) {
+            return;
+          }
+
+          const payload = {
+            ...lastPayload,
+            conflict_resolution: resolution,
+            overlap_acknowledged: resolution === 'append'
+          };
+          if (conflictResolutionField) {
+            conflictResolutionField.value = resolution;
+          }
+          if (overlapAcknowledgedField) {
+            overlapAcknowledgedField.value = resolution === 'append' ? 'true' : 'false';
+          }
+
+          if (statusBox) {
+            statusBox.textContent = `Resubmitting with ${resolution}…`;
+          }
+          hideOverlapPanel();
+          resetFeedback();
+          await submitPayload(payload);
+        });
       });
     })();
   </script>
