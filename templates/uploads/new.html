@@ -127,6 +127,12 @@
         name="conflict_resolution"
         value="append"
       />
+      <input
+        type="hidden"
+        id="overlap_acknowledged"
+        name="overlap_acknowledged"
+        value="false"
+      />
 
       <div id="overlap-panel" class="alert alert--warning" role="status" hidden>
         <p id="overlap-summary"></p>
@@ -163,6 +169,7 @@
       const errorBox = document.getElementById('form-errors');
       const statusBox = document.getElementById('form-status');
       const numberFields = new Set(['file_size', 'row_count', 'max_file_size', 'max_rows']);
+      const booleanFields = new Set(['overlap_acknowledged']);
       const enqueueUrl = form.dataset.enqueueUrl;
       const uploadUrl = form.dataset.uploadUrl;
       const uploadsListUrl = form.dataset.uploadsListUrl;
@@ -175,6 +182,7 @@
       const sourceYearField = document.getElementById('source_year');
       const workbookTypeField = document.getElementById('workbook_type');
       const conflictResolutionField = document.getElementById('conflict_resolution');
+      const overlapAcknowledgedField = document.getElementById('overlap_acknowledged');
       const overlapPanel = document.getElementById('overlap-panel');
       const overlapSummary = document.getElementById('overlap-summary');
       const overlapList = document.getElementById('overlap-list');
@@ -238,6 +246,9 @@
         overlapSummary.textContent = '';
         if (overlapList) {
           overlapList.innerHTML = '';
+        }
+        if (overlapAcknowledgedField) {
+          overlapAcknowledgedField.value = 'false';
         }
       }
 
@@ -375,6 +386,12 @@
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         resetFeedback();
+        if (conflictResolutionField) {
+          conflictResolutionField.value = 'append';
+        }
+        if (overlapAcknowledgedField) {
+          overlapAcknowledgedField.value = 'false';
+        }
         hideOverlapPanel();
 
         setSubmitting(true);
@@ -491,6 +508,8 @@
           }
           if (numberFields.has(key)) {
             payload[key] = Number(value);
+          } else if (booleanFields.has(key)) {
+            payload[key] = value === 'true';
           } else {
             payload[key] = value;
           }
@@ -519,10 +538,14 @@
 
           const payload = {
             ...lastPayload,
-            conflict_resolution: resolution
+            conflict_resolution: resolution,
+            overlap_acknowledged: resolution === 'append'
           };
           if (conflictResolutionField) {
             conflictResolutionField.value = resolution;
+          }
+          if (overlapAcknowledgedField) {
+            overlapAcknowledgedField.value = resolution === 'append' ? 'true' : 'false';
           }
 
           if (statusBox) {

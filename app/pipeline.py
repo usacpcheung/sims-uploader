@@ -142,15 +142,12 @@ def _delete_overlapping_rows(
     validated_column = job_runner._validate_identifier(  # noqa: SLF001 - internal reuse
         time_range_column, label="time range column"
     )
-    start_column = f"`{validated_column}_start`"
-    end_column = f"`{validated_column}_end`"
-
     with connection.cursor() as cursor:
         for start, end in intervals:
             cursor.execute(
                 (
                     f"DELETE FROM `{normalized_table}` "
-                    f"WHERE {start_column} <= %s AND {end_column} >= %s"
+                    f"WHERE `{validated_column}` <= %s AND `{validated_column}` >= %s"
                 ),
                 (end, start),
             )
@@ -167,6 +164,7 @@ def run_pipeline(
     job_id: str | None = None,
     status_notifier: Callable[[str, str | None], None] | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
+    time_range_format: str | None = None,
     conflict_resolution: str = "append",
     preflight_overlaps: list[Mapping[str, object]] | None = None,
 ) -> PipelineResult:
@@ -246,7 +244,7 @@ def run_pipeline(
         staging_table = table_config["table"]
         normalized_table = table_config.get("normalized_table")
         time_range_column = table_config.get("time_range_column")
-        time_range_format = table_config.get("time_range_format")
+        time_range_format = time_range_format or table_config.get("time_range_format")
         overlap_target_table = table_config.get("overlap_target_table")
         if not normalized_table:
             raise ValueError(
@@ -302,6 +300,7 @@ def run_pipeline(
                     target_table=overlap_target_table,
                     time_range_column=time_range_column,
                     time_ranges=effective_time_ranges,
+                    time_range_format=time_range_format,
                     db_settings=db_settings,
                 )
 
@@ -312,6 +311,7 @@ def run_pipeline(
                     staging_table,
                     [row["id"] for row in staging_rows],
                     file_hash=file_hash,
+                    status="overlap_skip",
                 )
                 connection.commit()
                 return PipelineResult(
@@ -357,6 +357,7 @@ def run_pipeline(
                 staging_table,
                 [row["id"] for row in staging_rows],
                 file_hash=file_hash,
+                status="processed",
             )
             connection.commit()
         except Exception as exc:
@@ -502,6 +503,7 @@ def cli(argv: Iterable[str] | None = None) -> str:
         target_table=table_config.get("overlap_target_table"),
         time_range_column=table_config.get("time_range_column"),
         time_ranges=effective_time_ranges,
+        time_range_format=table_config.get("time_range_format"),
     )
     if overlaps and args.conflict_resolution == "append":
         print("Upload overlaps existing records:", file=sys.stderr)

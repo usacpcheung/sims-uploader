@@ -45,7 +45,7 @@ def _validate_identifier(identifier: str, *, label: str) -> str:
     return identifier
 
 
-def _coerce_datetime(value: object, *, label: str) -> datetime:
+def _coerce_datetime(value: object, *, label: str, time_format: str | None = None) -> datetime:
     if isinstance(value, datetime):
         return value
     if isinstance(value, date):
@@ -57,6 +57,8 @@ def _coerce_datetime(value: object, *, label: str) -> datetime:
     if not text:
         raise ValueError(f"Missing {label} value for overlap check")
     try:
+        if time_format:
+            return datetime.strptime(text, time_format)
         return datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"Invalid {label} value: {value!r}") from exc
@@ -103,6 +105,7 @@ def check_time_overlap(
     target_table: str | None,
     time_range_column: str | None,
     time_ranges: Iterable[Mapping[str, object]] | None,
+    time_range_format: str | None = None,
     db_settings: Mapping[str, Any] | None = None,
 ) -> list[dict[str, object]]:
     """Return conflicts between supplied ranges and stored intervals.
@@ -114,11 +117,14 @@ def check_time_overlap(
     target_table:
         Table containing existing time ranges to compare against.
     time_range_column:
-        Base column name representing the stored range (expects ``<name>_start``
-        and ``<name>_end`` columns).
+        Column name representing the stored time values used to derive existing
+        ranges.
     time_ranges:
         Iterable of mappings with ``start`` and ``end`` keys parsed from the
         workbook content.
+    time_range_format:
+        Optional datetime format string used to parse stored and requested range
+        values when they are not ISO formatted.
     db_settings:
         Optional database configuration overrides.
     """
@@ -128,13 +134,18 @@ def check_time_overlap(
 
     validated_table = _validate_identifier(target_table, label="overlap target table")
     validated_column = _validate_identifier(time_range_column, label="time range column")
-    start_column = f"{validated_column}_start"
-    end_column = f"{validated_column}_end"
-
     cleaned_ranges: list[tuple[datetime, datetime]] = []
     for idx, range_value in enumerate(time_ranges):
-        start = _coerce_datetime(range_value.get("start"), label=f"time range {idx + 1} start")
-        end = _coerce_datetime(range_value.get("end"), label=f"time range {idx + 1} end")
+        start = _coerce_datetime(
+            range_value.get("start"),
+            label=f"time range {idx + 1} start",
+            time_format=time_range_format,
+        )
+        end = _coerce_datetime(
+            range_value.get("end"),
+            label=f"time range {idx + 1} end",
+            time_format=time_range_format,
+        )
         cleaned_ranges.append((start, end))
 
     settings = ingest_excel._get_db_settings(db_settings)
@@ -165,26 +176,64 @@ def check_time_overlap(
                 )
                 return []
 
-            for start, end in cleaned_ranges:
-                try:
-                    cursor.execute(
-                        (
-                            f"SELECT id, `{start_column}` AS range_start, `{end_column}` AS range_end "
-                            f"FROM `{validated_table}` "
-                            f"WHERE `{start_column}` <= %s AND `{end_column}` >= %s"
-                        ),
-                        (end, start),
+            try:
+                cursor.execute(
+                    (
+                        f"SELECT MIN(`{validated_column}`) AS range_start, "
+                        f"MAX(`{validated_column}`) AS range_end "
+                        f"FROM `{validated_table}`"
                     )
-                except pymysql.err.ProgrammingError as exc:
-                    if _is_missing_table_error(exc):
-                        LOGGER.info(
-                            "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
-                            workbook_type,
-                            validated_table,
-                        )
-                        return []
+                )
+            except pymysql.err.ProgrammingError as exc:
+                if _is_missing_table_error(exc):
+                    LOGGER.info(
+                        "Skipping overlap check for %s: target table %s is missing",  # noqa: TRY400
+                        workbook_type,
+                        validated_table,
+                    )
+                    return []
+                LOGGER.info(
+                    "Skipping overlap check for %s: unable to query %s.%s (%s)",
+                    workbook_type,
+                    validated_table,
+                    validated_column,
+                    exc,
+                )
+                return []
+
+            range_row = cursor.fetchone() or {}
+            try:
+                existing_start = _coerce_datetime(
+                    range_row.get("range_start"),
+                    label=f"{validated_column} existing start",
+                    time_format=time_range_format,
+                )
+                existing_end = _coerce_datetime(
+                    range_row.get("range_end"),
+                    label=f"{validated_column} existing end",
+                    time_format=time_range_format,
+                )
+            except ValueError as exc:
+                if "Missing" not in str(exc):
                     raise
-                for row in cursor.fetchall():
+                LOGGER.info(
+                    "Skipping overlap check for %s: no existing values for %s in %s",  # noqa: TRY400
+                    workbook_type,
+                    validated_column,
+                    validated_table,
+                )
+                return []
+
+            LOGGER.info(
+                "Derived existing %s range for %s: %s – %s",
+                validated_column,
+                validated_table,
+                existing_start,
+                existing_end,
+            )
+
+            for start, end in cleaned_ranges:
+                if existing_start <= end and existing_end >= start:
                     overlaps.append(
                         {
                             "workbook_type": workbook_type,
@@ -192,9 +241,9 @@ def check_time_overlap(
                             "time_range_column": validated_column,
                             "requested_start": start,
                             "requested_end": end,
-                            "existing_start": row.get("range_start"),
-                            "existing_end": row.get("range_end"),
-                            "record_id": row.get("id"),
+                            "existing_start": existing_start,
+                            "existing_end": existing_end,
+                            "record_id": None,
                         }
                     )
     finally:
@@ -284,6 +333,7 @@ def enqueue_job(
     max_file_size: int | None = None,
     max_rows: int | None = None,
     time_ranges: list[Mapping[str, object]] | None = None,
+    time_range_format: str | None = None,
     conflict_resolution: str = "append",
     normalized_table: str | None = None,
     overlap_target_table: str | None = None,
@@ -330,6 +380,7 @@ def enqueue_job(
         "batch_id": batch_id,
         "db_settings": db_settings,
         "time_ranges": time_ranges,
+        "time_range_format": time_range_format,
         "conflict_resolution": conflict_resolution,
         "normalized_table": normalized_table,
         "overlap_target_table": overlap_target_table or normalized_table,
@@ -449,6 +500,7 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
     db_settings = payload.get("db_settings")
     normalized_table = payload.get("normalized_table")
     time_range_column = payload.get("time_range_column")
+    time_range_format = payload.get("time_range_format")
     overlap_target_table = payload.get("overlap_target_table") or normalized_table
     derived_time_ranges = payload.get("time_ranges")
     conflict_resolution = payload.get("conflict_resolution", "append")
@@ -475,6 +527,7 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
         target_table=overlap_target_table,
         time_range_column=time_range_column,
         time_ranges=derived_time_ranges,
+        time_range_format=time_range_format,
         db_settings=db_settings,
     )
 
@@ -489,6 +542,7 @@ def process_job(job_id: str, payload: Mapping[str, Any]) -> pipeline.PipelineRes
             job_id=job_id,
             status_notifier=_notify,
             time_ranges=derived_time_ranges,
+            time_range_format=time_range_format,
             conflict_resolution=conflict_resolution,
             preflight_overlaps=preflight_overlaps,
         )
