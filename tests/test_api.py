@@ -25,7 +25,15 @@ from app import storage
 from tests import test_job_runner
 
 
-def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
+def _make_job(
+    job_id: str = "job-123",
+    *,
+    latest_message: str | None = None,
+    processed_rows: int | None = None,
+    successful_rows: int | None = None,
+    rejected_rows: int | None = None,
+    normalized_table_name: str | None = None,
+) -> job_store.UploadJob:
     now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
     return job_store.UploadJob(
         job_id=job_id,
@@ -36,6 +44,11 @@ def _make_job(job_id: str = "job-123") -> job_store.UploadJob:
         status="Queued",
         created_at=now,
         updated_at=now,
+        latest_message=latest_message,
+        processed_rows=processed_rows,
+        successful_rows=successful_rows,
+        rejected_rows=rejected_rows,
+        normalized_table_name=normalized_table_name,
     )
 
 
@@ -346,6 +359,124 @@ def test_create_upload_returns_overlap_for_date_column(monkeypatch):
     assert overlap["existing_end"].startswith("2024-01-09")
 
 
+def test_create_upload_returns_overlap_for_date_column_with_datetime_input(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+    min_max = {"range_start": date(2024, 1, 5), "range_end": date(2024, 1, 9)}
+
+    connection = test_job_runner._FakeConnection([], executed, min_max=min_max)
+    monkeypatch.setattr(job_runner.pymysql, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        job_runner.ingest_excel, "_get_db_settings", lambda overrides=None: {"database": "db"}
+    )
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar_table",
+            "time_range_column": "period",
+        },
+    )
+    monkeypatch.setattr(api.time_range_utils, "derive_ranges_from_workbook", lambda *_, **__: None)
+
+    enqueue_called = False
+
+    def _fail_enqueue(**kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        raise AssertionError("enqueue_job should not be called when overlaps exist")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", _fail_enqueue)
+
+    client = TestClient(api.app)
+    response = client.post(
+        "/uploads",
+        json={
+            "workbook_path": "uploads/example.xlsx",
+            "sheet": "SHEET",
+            "source_year": "2024",
+            "time_ranges": [
+                {
+                    "start": "2024-01-01T12:00:00",
+                    "end": "2024-01-10T18:00:00",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert not enqueue_called
+    payload = response.json()
+    overlap = payload["overlap_detected"]["overlaps"][0]
+    assert overlap["target_table"] == "calendar_table"
+    assert overlap["existing_start"].startswith("2024-01-05")
+    assert overlap["existing_end"].startswith("2024-01-09")
+
+
+def test_create_upload_allows_acknowledged_append(monkeypatch):
+    overlaps = [
+        {
+            "target_table": "calendar_table",
+            "time_range_column": "period",
+            "requested_start": datetime(2024, 1, 1, tzinfo=timezone.utc),
+            "requested_end": datetime(2024, 1, 31, tzinfo=timezone.utc),
+            "existing_start": datetime(2024, 1, 5, tzinfo=timezone.utc),
+            "existing_end": datetime(2024, 1, 20, tzinfo=timezone.utc),
+            "record_id": 99,
+        }
+    ]
+    overlap_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        api.prep_excel,
+        "_get_table_config",
+        lambda sheet, workbook_type="default": {
+            "overlap_target_table": "calendar_table",
+            "time_range_column": "period",
+        },
+    )
+
+    def _capture_overlaps(**kwargs):
+        overlap_calls.append(kwargs)
+        return overlaps
+
+    monkeypatch.setattr(job_runner, "check_time_overlap", _capture_overlaps)
+
+    enqueue_called = False
+
+    def _enqueue_job(**kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        return "job-ack", SimpleNamespace(id="rq-job-ack")
+
+    monkeypatch.setattr(job_runner, "enqueue_job", _enqueue_job)
+    job = _make_job("job-ack")
+    monkeypatch.setattr(job_store, "get_job", lambda job_id: job)
+
+    client = TestClient(api.app)
+    payload = {
+        "workbook_path": "uploads/example.xlsx",
+        "sheet": "SHEET",
+        "source_year": "2024",
+        "time_ranges": [
+            {"start": "2024-01-01T00:00:00Z", "end": "2024-01-31T00:00:00Z"}
+        ],
+    }
+
+    first_response = client.post("/uploads", json=payload)
+    assert first_response.status_code == HTTPStatus.CONFLICT
+    assert first_response.json()["overlap_detected"]["overlaps"]
+    assert len(overlap_calls) == 1
+    assert not enqueue_called
+
+    second_response = client.post(
+        "/uploads", json={**payload, "overlap_acknowledged": True}
+    )
+    assert second_response.status_code == HTTPStatus.ACCEPTED
+    assert second_response.json()["job"]["job_id"] == "job-ack"
+    assert enqueue_called
+    assert len(overlap_calls) == 2
+
+
 def test_create_upload_passes_time_range_format(monkeypatch):
     captured_kwargs: dict[str, object] = {}
 
@@ -536,7 +667,15 @@ def test_list_upload_events(monkeypatch):
 
 
 def test_list_recent_uploads(monkeypatch):
-    jobs = [_make_job("job-1"), _make_job("job-2")]
+    jobs = [
+        _make_job(
+            "job-1",
+            latest_message="Upload skipped due to overlapping records",
+            processed_rows=0,
+            rejected_rows=3,
+        ),
+        _make_job("job-2"),
+    ]
     monkeypatch.setattr(job_store, "list_recent_jobs", lambda limit=20: jobs)
 
     client = TestClient(api.app)
@@ -545,3 +684,5 @@ def test_list_recent_uploads(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert [job["job_id"] for job in payload] == ["job-1", "job-2"]
+    assert payload[0]["latest_message"] == "Upload skipped due to overlapping records"
+    assert payload[0]["rejected_rows"] == 3
